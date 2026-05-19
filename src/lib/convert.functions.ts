@@ -19,8 +19,12 @@ export const convertVideo = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const supadataKey = process.env.SUPADATA_API_KEY;
     const lovableKey = process.env.LOVABLE_API_KEY;
+    const openrouterKey = process.env.OPENROUTER_API_KEY;
+
     if (!supadataKey) return { error: "Missing SUPADATA_API_KEY." };
-    if (!lovableKey) return { error: "Missing LOVABLE_API_KEY." };
+    if (!lovableKey && !openrouterKey) {
+      return { error: "Missing either LOVABLE_API_KEY or OPENROUTER_API_KEY." };
+    }
 
     // 1. Fetch transcript
     let transcript = "";
@@ -83,14 +87,32 @@ At the end, append a JSON block exactly like this (after the blog content):
 \`\`\``;
 
     try {
-      const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      const endpoint = openrouterKey 
+        ? "https://openrouter.ai/api/v1/chat/completions"
+        : "https://ai.gateway.lovable.dev/v1/chat/completions";
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+
+      if (openrouterKey) {
+        headers["Authorization"] = `Bearer ${openrouterKey}`;
+        // Optional headers for OpenRouter rankings
+        headers["HTTP-Referer"] = "http://localhost:8080";
+        headers["X-Title"] = "YTBlog Converter";
+      } else {
+        headers["Authorization"] = `Bearer ${lovableKey}`;
+      }
+
+      const model = openrouterKey 
+        ? "openrouter/free" // Automatically routes to the best available 100% free model
+        : "google/gemini-3-flash-preview";
+
+      const aiRes = await fetch(endpoint, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${lovableKey}`,
-          "Content-Type": "application/json",
-        },
+        headers,
         body: JSON.stringify({
-          model: "google/gemini-3-flash-preview",
+          model,
           messages: [
             { role: "system", content: system },
             { role: "user", content: user },
