@@ -2,8 +2,43 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import fs from "fs";
 import path from "path";
+import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 const DB_PATH = path.resolve(process.cwd(), "users_db.json");
+
+// Sync a user's profile (display name, email, plan) to the Supabase `profiles` table
+// so it persists across deployments / sandbox resets.
+async function syncProfileToSupabase(u: { id: string; email: string; fullName: string; plan?: string }) {
+  try {
+    await supabaseAdmin
+      .from("profiles")
+      .upsert(
+        {
+          user_id: u.id,
+          email: u.email,
+          full_name: u.fullName,
+          plan: u.plan || "Free",
+        },
+        { onConflict: "user_id" }
+      );
+  } catch (e) {
+    console.error("Failed to sync profile to Supabase:", e);
+  }
+}
+
+async function loadProfileFromSupabase(userId: string) {
+  try {
+    const { data } = await supabaseAdmin
+      .from("profiles")
+      .select("full_name, plan, email")
+      .eq("user_id", userId)
+      .maybeSingle();
+    return data;
+  } catch (e) {
+    console.error("Failed to load profile from Supabase:", e);
+    return null;
+  }
+}
 
 interface Generation {
   id: string;
@@ -99,6 +134,8 @@ export const authenticateUser = createServerFn({ method: "POST" })
       db.users.push(newUser);
       writeDb(db);
 
+      await syncProfileToSupabase(newUser);
+
       return {
         user: {
           id: newUser.id,
@@ -117,11 +154,26 @@ export const authenticateUser = createServerFn({ method: "POST" })
         return { error: "Incorrect password", code: "BAD_PASSWORD" as const };
       }
 
+      // Prefer the authoritative profile from Supabase (survives sandbox resets).
+      const remote = await loadProfileFromSupabase(existingUser.id);
+      const fullName = remote?.full_name || existingUser.fullName;
+      const plan = remote?.plan || existingUser.plan || "Free";
+
+      // Keep the local JSON cache in sync.
+      if (remote) {
+        existingUser.fullName = fullName;
+        existingUser.plan = plan;
+        writeDb(db);
+      } else {
+        // Backfill Supabase if this user existed before the profiles table.
+        await syncProfileToSupabase(existingUser);
+      }
+
       return {
         user: {
           id: existingUser.id,
           email: existingUser.email,
-          user_metadata: { full_name: existingUser.fullName, plan: existingUser.plan || "Free" },
+          user_metadata: { full_name: fullName, plan },
         },
       };
     }
@@ -136,21 +188,22 @@ export const updateUserProfile = createServerFn({ method: "POST" })
     const db = readDb();
 
     const userIndex = db.users.findIndex(u => u.id === id);
-    if (userIndex === -1) {
-      throw new Error("User not found");
+    if (userIndex !== -1) {
+      db.users[userIndex].fullName = fullName;
+      writeDb(db);
     }
 
-    db.users[userIndex].fullName = fullName;
-    writeDb(db);
+    // Persist to Supabase regardless of local JSON state, so the display
+    // name survives sandbox/deployment resets.
+    const email = db.users[userIndex]?.email ?? "";
+    const plan = db.users[userIndex]?.plan ?? "Free";
+    await syncProfileToSupabase({ id, email, fullName, plan });
 
     return {
       user: {
-        id: db.users[userIndex].id,
-        email: db.users[userIndex].email,
-        user_metadata: { 
-          full_name: db.users[userIndex].fullName,
-          plan: db.users[userIndex].plan || "Free"
-        },
+        id,
+        email,
+        user_metadata: { full_name: fullName, plan },
       }
     };
   });
@@ -168,6 +221,13 @@ export const upgradeUserPlan = createServerFn({ method: "POST" })
 
     db.users[userIndex].plan = plan;
     writeDb(db);
+
+    await syncProfileToSupabase({
+      id,
+      email: db.users[userIndex].email,
+      fullName: db.users[userIndex].fullName,
+      plan,
+    });
 
     return {
       user: {
@@ -188,12 +248,16 @@ export const deleteUserAccount = createServerFn({ method: "POST" })
     const db = readDb();
 
     const userIndex = db.users.findIndex(u => u.id === id);
-    if (userIndex === -1) {
-      throw new Error("User not found");
+    if (userIndex !== -1) {
+      db.users.splice(userIndex, 1);
+      writeDb(db);
     }
 
-    db.users.splice(userIndex, 1);
-    writeDb(db);
+    try {
+      await supabaseAdmin.from("profiles").delete().eq("user_id", id);
+    } catch (e) {
+      console.error("Failed to delete Supabase profile:", e);
+    }
 
     return { success: true };
   });
