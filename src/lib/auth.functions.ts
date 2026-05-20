@@ -248,12 +248,16 @@ export const deleteUserAccount = createServerFn({ method: "POST" })
     const db = readDb();
 
     const userIndex = db.users.findIndex(u => u.id === id);
-    if (userIndex === -1) {
-      throw new Error("User not found");
+    if (userIndex !== -1) {
+      db.users.splice(userIndex, 1);
+      writeDb(db);
     }
 
-    db.users.splice(userIndex, 1);
-    writeDb(db);
+    try {
+      await supabaseAdmin.from("profiles").delete().eq("user_id", id);
+    } catch (e) {
+      console.error("Failed to delete Supabase profile:", e);
+    }
 
     return { success: true };
   });
