@@ -35,31 +35,28 @@ function AuthPage() {
     setError(null);
 
     try {
-      try {
-        // Try to log in first using our new custom backend
-        const res = await authFn({ data: { email, password, action: "login" } });
-        localStorage.setItem("custom_session", JSON.stringify(res.user));
-        
-        // Dispatch custom event so the index page knows auth changed
-        window.dispatchEvent(new Event("auth_changed"));
-        
-        toast.success("Successfully logged in!");
-        navigate({ to: "/" });
-      } catch (signInError: any) {
-        // Only automatically sign up if the user does not exist in the database
-        if (signInError.message?.includes("User does not exist")) {
-          const res = await authFn({ data: { email, password, action: "signup" } });
+      // Try to log in first
+      let res: any = await authFn({ data: { email, password, action: "login" } });
+
+      if (res.error) {
+        if (res.code === "USER_NOT_FOUND") {
+          // Auto-signup new user
+          res = await authFn({ data: { email, password, action: "signup" } });
+          if (res.error) throw new Error(res.error);
           localStorage.setItem("custom_session", JSON.stringify(res.user));
-          
           window.dispatchEvent(new Event("auth_changed"));
-          
           toast.success("Signup successful! You are now logged in.");
           navigate({ to: "/" });
-        } else if (signInError.message?.includes("Incorrect password")) {
+        } else if (res.code === "BAD_PASSWORD") {
           throw new Error("Incorrect password. Please try again.");
         } else {
-          throw signInError;
+          throw new Error(res.error);
         }
+      } else {
+        localStorage.setItem("custom_session", JSON.stringify(res.user));
+        window.dispatchEvent(new Event("auth_changed"));
+        toast.success("Successfully logged in!");
+        navigate({ to: "/" });
       }
     } catch (err: any) {
       const errMsg = err.message || "An error occurred during authentication.";

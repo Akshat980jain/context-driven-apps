@@ -85,7 +85,7 @@ export const authenticateUser = createServerFn({ method: "POST" })
 
     if (action === "signup") {
       if (existingUser) {
-        throw new Error("User already exists. Please log in.");
+        return { error: "User already exists. Please log in.", code: "USER_EXISTS" as const };
       }
 
       const newUser: User = {
@@ -99,7 +99,6 @@ export const authenticateUser = createServerFn({ method: "POST" })
       db.users.push(newUser);
       writeDb(db);
 
-      // Return a simulated Supabase-like session object
       return {
         user: {
           id: newUser.id,
@@ -111,11 +110,11 @@ export const authenticateUser = createServerFn({ method: "POST" })
 
     if (action === "login") {
       if (!existingUser) {
-        throw new Error("User does not exist");
+        return { error: "User does not exist", code: "USER_NOT_FOUND" as const };
       }
 
       if (existingUser.passwordHash !== passwordHash) {
-        throw new Error("Incorrect password");
+        return { error: "Incorrect password", code: "BAD_PASSWORD" as const };
       }
 
       return {
@@ -127,7 +126,7 @@ export const authenticateUser = createServerFn({ method: "POST" })
       };
     }
 
-    throw new Error("Unknown action");
+    return { error: "Unknown action", code: "UNKNOWN_ACTION" as const };
   });
 
 export const updateUserProfile = createServerFn({ method: "POST" })
