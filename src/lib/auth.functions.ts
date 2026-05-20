@@ -134,6 +134,8 @@ export const authenticateUser = createServerFn({ method: "POST" })
       db.users.push(newUser);
       writeDb(db);
 
+      await syncProfileToSupabase(newUser);
+
       return {
         user: {
           id: newUser.id,
@@ -152,11 +154,26 @@ export const authenticateUser = createServerFn({ method: "POST" })
         return { error: "Incorrect password", code: "BAD_PASSWORD" as const };
       }
 
+      // Prefer the authoritative profile from Supabase (survives sandbox resets).
+      const remote = await loadProfileFromSupabase(existingUser.id);
+      const fullName = remote?.full_name || existingUser.fullName;
+      const plan = remote?.plan || existingUser.plan || "Free";
+
+      // Keep the local JSON cache in sync.
+      if (remote) {
+        existingUser.fullName = fullName;
+        existingUser.plan = plan;
+        writeDb(db);
+      } else {
+        // Backfill Supabase if this user existed before the profiles table.
+        await syncProfileToSupabase(existingUser);
+      }
+
       return {
         user: {
           id: existingUser.id,
           email: existingUser.email,
-          user_metadata: { full_name: existingUser.fullName, plan: existingUser.plan || "Free" },
+          user_metadata: { full_name: fullName, plan },
         },
       };
     }
@@ -171,21 +188,22 @@ export const updateUserProfile = createServerFn({ method: "POST" })
     const db = readDb();
 
     const userIndex = db.users.findIndex(u => u.id === id);
-    if (userIndex === -1) {
-      throw new Error("User not found");
+    if (userIndex !== -1) {
+      db.users[userIndex].fullName = fullName;
+      writeDb(db);
     }
 
-    db.users[userIndex].fullName = fullName;
-    writeDb(db);
+    // Persist to Supabase regardless of local JSON state, so the display
+    // name survives sandbox/deployment resets.
+    const email = db.users[userIndex]?.email ?? "";
+    const plan = db.users[userIndex]?.plan ?? "Free";
+    await syncProfileToSupabase({ id, email, fullName, plan });
 
     return {
       user: {
-        id: db.users[userIndex].id,
-        email: db.users[userIndex].email,
-        user_metadata: { 
-          full_name: db.users[userIndex].fullName,
-          plan: db.users[userIndex].plan || "Free"
-        },
+        id,
+        email,
+        user_metadata: { full_name: fullName, plan },
       }
     };
   });
@@ -203,6 +221,13 @@ export const upgradeUserPlan = createServerFn({ method: "POST" })
 
     db.users[userIndex].plan = plan;
     writeDb(db);
+
+    await syncProfileToSupabase({
+      id,
+      email: db.users[userIndex].email,
+      fullName: db.users[userIndex].fullName,
+      plan,
+    });
 
     return {
       user: {
