@@ -205,13 +205,21 @@ export const getUserDashboardData = createServerFn({ method: "GET" })
     const db = readDb();
     const user = db.users.find(u => u.id === userId);
     if (!user) {
-      throw new Error("User not found");
+      // User session is stale (db reset). Return empty defaults so the client can recover.
+      return {
+        generations: [],
+        workspaces: [],
+        templates: [],
+        plan: "Free",
+        notFound: true,
+      };
     }
     return {
       generations: user.generations || [],
       workspaces: user.workspaces || [],
       templates: user.templates || [],
       plan: user.plan || "Free",
+      notFound: false,
     };
   });
 
