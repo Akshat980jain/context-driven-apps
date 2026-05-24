@@ -1,44 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import fs from "fs";
-import path from "path";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-
-const DB_PATH = path.resolve(process.cwd(), "users_db.json");
-
-// Sync a user's profile (display name, email, plan) to the Supabase `profiles` table
-// so it persists across deployments / sandbox resets.
-async function syncProfileToSupabase(u: { id: string; email: string; fullName: string; plan?: string }) {
-  try {
-    await supabaseAdmin
-      .from("profiles")
-      .upsert(
-        {
-          user_id: u.id,
-          email: u.email,
-          full_name: u.fullName,
-          plan: u.plan || "Free",
-        },
-        { onConflict: "user_id" }
-      );
-  } catch (e) {
-    console.error("Failed to sync profile to Supabase:", e);
-  }
-}
-
-async function loadProfileFromSupabase(userId: string) {
-  try {
-    const { data } = await supabaseAdmin
-      .from("profiles")
-      .select("full_name, plan, email")
-      .eq("user_id", userId)
-      .maybeSingle();
-    return data;
-  } catch (e) {
-    console.error("Failed to load profile from Supabase:", e);
-    return null;
-  }
-}
 
 interface GenerationVersion {
   id: string;
@@ -79,46 +41,6 @@ interface Template {
   format: string;
 }
 
-interface User {
-  id: string;
-  email: string;
-  passwordHash: string;
-  fullName: string;
-  generations?: Generation[];
-  workspaces?: Workspace[];
-  templates?: Template[];
-  plan?: string;
-  integrations?: {
-    devto?: string;
-    medium?: string;
-    hashnode?: string;
-  };
-}
-
-// Helper to init/read DB
-function readDb(): { users: User[] } {
-  if (!fs.existsSync(DB_PATH)) {
-    fs.writeFileSync(DB_PATH, JSON.stringify({ users: [] }));
-  }
-  const db = JSON.parse(fs.readFileSync(DB_PATH, "utf-8"));
-  
-  // Backwards compatibility initialization
-  db.users.forEach((u: User) => {
-    if (!u.generations) u.generations = [];
-    if (!u.workspaces) u.workspaces = [];
-    if (!u.templates) u.templates = [];
-    if (!u.plan) u.plan = "Free";
-    if (!u.integrations) u.integrations = { devto: "", medium: "", hashnode: "" };
-  });
-  
-  return db;
-}
-
-// Helper to write DB
-function writeDb(data: { users: User[] }) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-}
-
 const AuthSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
@@ -129,40 +51,49 @@ export const authenticateUser = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => AuthSchema.parse(data))
   .handler(async ({ data }) => {
     const { email, password, action } = data;
-    const db = readDb();
 
-    // Very simple password hashing mock for demonstration
-    // In production you would use bcrypt
+    // Password hashing technique identical to original for complete backwards compatibility
     const passwordHash = Buffer.from(password).toString("base64");
 
-    const existingUser = db.users.find((u) => u.email === email);
+    // Query profile from Supabase by email
+    const { data: existingUser } = await supabaseAdmin
+      .from("profiles")
+      .select("*")
+      .eq("email", email)
+      .maybeSingle();
 
     if (action === "signup") {
       if (existingUser) {
         return { error: "User already exists. Please log in.", code: "USER_EXISTS" as const };
       }
 
-      const newUser: User = {
-        id: crypto.randomUUID(),
+      const userId = crypto.randomUUID();
+      const newUser = {
+        user_id: userId,
         email,
-        passwordHash,
-        fullName: email.split("@")[0],
+        password_hash: passwordHash,
+        full_name: email.split("@")[0],
         plan: "Free",
+        integrations: { devto: "", medium: "", hashnode: "" }
       };
 
-      db.users.push(newUser);
-      writeDb(db);
+      const { error: insertError } = await supabaseAdmin
+        .from("profiles")
+        .insert(newUser);
 
-      await syncProfileToSupabase(newUser);
+      if (insertError) {
+        console.error("Signup failed during Supabase profile insertion:", insertError);
+        return { error: "Could not complete signup. Please try again.", code: "UNKNOWN_ACTION" as const };
+      }
 
       return {
         user: {
-          id: newUser.id,
-          email: newUser.email,
+          id: userId,
+          email,
           user_metadata: { 
-            full_name: newUser.fullName, 
+            full_name: newUser.full_name, 
             plan: newUser.plan,
-            integrations: { devto: "", medium: "", hashnode: "" }
+            integrations: newUser.integrations
           },
         },
       };
@@ -173,33 +104,20 @@ export const authenticateUser = createServerFn({ method: "POST" })
         return { error: "User does not exist", code: "USER_NOT_FOUND" as const };
       }
 
-      if (existingUser.passwordHash !== passwordHash) {
+      if (existingUser.password_hash !== passwordHash) {
         return { error: "Incorrect password", code: "BAD_PASSWORD" as const };
       }
 
-      // Prefer the authoritative profile from Supabase (survives sandbox resets).
-      const remote = await loadProfileFromSupabase(existingUser.id);
-      const fullName = remote?.full_name || existingUser.fullName;
-      const plan = remote?.plan || existingUser.plan || "Free";
-
-      // Keep the local JSON cache in sync.
-      if (remote) {
-        existingUser.fullName = fullName;
-        existingUser.plan = plan;
-        writeDb(db);
-      } else {
-        // Backfill Supabase if this user existed before the profiles table.
-        await syncProfileToSupabase(existingUser);
-      }
+      const integrations = (existingUser.integrations as any) || { devto: "", medium: "", hashnode: "" };
 
       return {
         user: {
-          id: existingUser.id,
+          id: existingUser.user_id,
           email: existingUser.email,
           user_metadata: { 
-            full_name: fullName, 
-            plan,
-            integrations: existingUser.integrations || { devto: "", medium: "", hashnode: "" }
+            full_name: existingUser.full_name, 
+            plan: existingUser.plan || "Free",
+            integrations
           },
         },
       };
@@ -212,28 +130,28 @@ export const updateUserProfile = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => z.object({ id: z.string(), fullName: z.string() }).parse(data))
   .handler(async ({ data }) => {
     const { id, fullName } = data;
-    const db = readDb();
 
-    const userIndex = db.users.findIndex(u => u.id === id);
-    if (userIndex !== -1) {
-      db.users[userIndex].fullName = fullName;
-      writeDb(db);
+    const { data: updatedProfile, error } = await supabaseAdmin
+      .from("profiles")
+      .update({ full_name: fullName })
+      .eq("user_id", id)
+      .select()
+      .maybeSingle();
+
+    if (error || !updatedProfile) {
+      throw new Error("User not found or failed to update profile");
     }
 
-    // Persist to Supabase regardless of local JSON state, so the display
-    // name survives sandbox/deployment resets.
-    const email = db.users[userIndex]?.email ?? "";
-    const plan = db.users[userIndex]?.plan ?? "Free";
-    await syncProfileToSupabase({ id, email, fullName, plan });
+    const integrations = (updatedProfile.integrations as any) || { devto: "", medium: "", hashnode: "" };
 
     return {
       user: {
         id,
-        email,
+        email: updatedProfile.email,
         user_metadata: { 
           full_name: fullName, 
-          plan,
-          integrations: db.users[userIndex]?.integrations || { devto: "", medium: "", hashnode: "" }
+          plan: updatedProfile.plan || "Free",
+          integrations
         },
       }
     };
@@ -243,31 +161,28 @@ export const upgradeUserPlan = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => z.object({ id: z.string(), plan: z.string() }).parse(data))
   .handler(async ({ data }) => {
     const { id, plan } = data;
-    const db = readDb();
 
-    const userIndex = db.users.findIndex(u => u.id === id);
-    if (userIndex === -1) {
-      throw new Error("User not found");
+    const { data: updatedProfile, error } = await supabaseAdmin
+      .from("profiles")
+      .update({ plan })
+      .eq("user_id", id)
+      .select()
+      .maybeSingle();
+
+    if (error || !updatedProfile) {
+      throw new Error("User not found or failed to upgrade plan");
     }
 
-    db.users[userIndex].plan = plan;
-    writeDb(db);
-
-    await syncProfileToSupabase({
-      id,
-      email: db.users[userIndex].email,
-      fullName: db.users[userIndex].fullName,
-      plan,
-    });
+    const integrations = (updatedProfile.integrations as any) || { devto: "", medium: "", hashnode: "" };
 
     return {
       user: {
-        id: db.users[userIndex].id,
-        email: db.users[userIndex].email,
+        id,
+        email: updatedProfile.email,
         user_metadata: { 
-          full_name: db.users[userIndex].fullName,
-          plan: db.users[userIndex].plan || "Free",
-          integrations: db.users[userIndex].integrations || { devto: "", medium: "", hashnode: "" }
+          full_name: updatedProfile.full_name,
+          plan: updatedProfile.plan || "Free",
+          integrations
         },
       }
     };
@@ -277,20 +192,7 @@ export const deleteUserAccount = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => z.object({ id: z.string() }).parse(data))
   .handler(async ({ data }) => {
     const { id } = data;
-    const db = readDb();
-
-    const userIndex = db.users.findIndex(u => u.id === id);
-    if (userIndex !== -1) {
-      db.users.splice(userIndex, 1);
-      writeDb(db);
-    }
-
-    try {
-      await supabaseAdmin.from("profiles").delete().eq("user_id", id);
-    } catch (e) {
-      console.error("Failed to delete Supabase profile:", e);
-    }
-
+    await supabaseAdmin.from("profiles").delete().eq("user_id", id);
     return { success: true };
   });
 
@@ -298,10 +200,14 @@ export const getUserDashboardData = createServerFn({ method: "GET" })
   .inputValidator((data: unknown) => z.object({ userId: z.string() }).parse(data))
   .handler(async ({ data }) => {
     const { userId } = data;
-    const db = readDb();
-    const user = db.users.find(u => u.id === userId);
-    if (!user) {
-      // User session is stale (db reset). Return empty defaults so the client can recover.
+
+    const { data: profile } = await supabaseAdmin
+      .from("profiles")
+      .select("plan, integrations")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!profile) {
       return {
         generations: [],
         workspaces: [],
@@ -310,12 +216,66 @@ export const getUserDashboardData = createServerFn({ method: "GET" })
         notFound: true,
       };
     }
+
+    // Parallel fetch from Supabase
+    const [wsRes, tplRes, genRes] = await Promise.all([
+      supabaseAdmin.from("workspaces").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
+      supabaseAdmin.from("templates").select("*").eq("user_id", userId).order("created_at", { ascending: true }),
+      supabaseAdmin.from("generations").select("*, versions:generation_versions(*)").eq("user_id", userId).order("created_at", { ascending: false })
+    ]);
+
+    const mappedWorkspaces = (wsRes.data || []).map((w: any) => ({
+      id: w.id,
+      name: w.name
+    }));
+
+    const mappedTemplates = (tplRes.data || []).map((t: any) => ({
+      id: t.id,
+      name: t.name,
+      tone: t.tone,
+      length: t.length,
+      format: t.format
+    }));
+
+    const mappedGenerations = (genRes.data || []).map((g: any) => {
+      const mappedVersions = (g.versions || []).map((v: any) => ({
+        id: v.id,
+        tone: v.tone,
+        length: v.length,
+        format: v.format,
+        title: v.title,
+        markdown: v.markdown,
+        seo: v.seo,
+        createdAt: v.created_at
+      }));
+
+      // Sort versions chronologically by creation timestamp
+      mappedVersions.sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+      return {
+        id: g.id,
+        url: g.url,
+        tone: g.tone,
+        length: g.length,
+        format: g.format,
+        title: g.title,
+        markdown: g.markdown,
+        seo: g.seo,
+        workspaceId: g.workspace_id || undefined,
+        activeVersionId: g.active_version_id || undefined,
+        createdAt: g.created_at,
+        versions: mappedVersions
+      };
+    });
+
+    const integrations = (profile.integrations as any) || { devto: "", medium: "", hashnode: "" };
+
     return {
-      generations: user.generations || [],
-      workspaces: user.workspaces || [],
-      templates: user.templates || [],
-      plan: user.plan || "Free",
-      integrations: user.integrations || { devto: "", medium: "", hashnode: "" },
+      generations: mappedGenerations,
+      workspaces: mappedWorkspaces,
+      templates: mappedTemplates,
+      plan: profile.plan || "Free",
+      integrations,
       notFound: false,
     };
   });
@@ -335,68 +295,146 @@ export const saveGenerationHistory = createServerFn({ method: "POST" })
   }).parse(data))
   .handler(async ({ data }) => {
     const { userId, id, ...genData } = data;
-    const db = readDb();
-    const userIndex = db.users.findIndex(u => u.id === userId);
-    if (userIndex === -1) throw new Error("User not found");
-
-    if (!db.users[userIndex].generations) db.users[userIndex].generations = [];
 
     const newVersionId = crypto.randomUUID();
-    const newVersion: GenerationVersion = {
-      id: newVersionId,
+
+    const insertVersion = async (genId: string) => {
+      const newVer = {
+        id: newVersionId,
+        generation_id: genId,
+        tone: genData.tone,
+        length: genData.length,
+        format: genData.format,
+        title: genData.title,
+        markdown: genData.markdown,
+        seo: genData.seo || {}
+      };
+      await supabaseAdmin.from("generation_versions").insert(newVer);
+    };
+
+    if (id) {
+      // Fetch existing generation row to verify
+      const { data: existing } = await supabaseAdmin
+        .from("generations")
+        .select("*")
+        .eq("id", id)
+        .maybeSingle();
+
+      if (existing) {
+        await insertVersion(id);
+
+        const { data: updated } = await supabaseAdmin
+          .from("generations")
+          .update({
+            url: genData.url,
+            tone: genData.tone,
+            length: genData.length,
+            format: genData.format,
+            title: genData.title,
+            markdown: genData.markdown,
+            seo: genData.seo || {},
+            active_version_id: newVersionId,
+            workspace_id: genData.workspaceId || existing.workspace_id || null
+          })
+          .eq("id", id)
+          .select()
+          .single();
+
+        if (!updated) {
+          throw new Error("Failed to update generation row in Supabase");
+        }
+
+        // Fetch all versions of this generation
+        const { data: dbVersions } = await supabaseAdmin
+          .from("generation_versions")
+          .select("*")
+          .eq("generation_id", id)
+          .order("created_at", { ascending: true });
+
+        const mappedVersions = (dbVersions || []).map((v: any) => ({
+          id: v.id,
+          tone: v.tone,
+          length: v.length,
+          format: v.format,
+          title: v.title,
+          markdown: v.markdown,
+          seo: v.seo,
+          createdAt: v.created_at
+        }));
+
+        const returnedGen = {
+          id: updated.id,
+          url: updated.url,
+          tone: updated.tone,
+          length: updated.length,
+          format: updated.format,
+          title: updated.title,
+          markdown: updated.markdown,
+          seo: updated.seo,
+          workspaceId: updated.workspace_id || undefined,
+          activeVersionId: updated.active_version_id || undefined,
+          createdAt: updated.created_at,
+          versions: mappedVersions
+        };
+
+        return { generation: returnedGen, isUpdate: true };
+      }
+    }
+
+    // New generation creation
+    const newGenId = crypto.randomUUID();
+    const newGenRow = {
+      id: newGenId,
+      user_id: userId,
+      url: genData.url,
       tone: genData.tone,
       length: genData.length,
       format: genData.format,
       title: genData.title,
       markdown: genData.markdown,
-      seo: genData.seo,
-      createdAt: new Date().toISOString()
+      seo: genData.seo || {},
+      workspace_id: genData.workspaceId || null,
+      active_version_id: newVersionId
     };
 
-    if (id) {
-      const genIndex = db.users[userIndex].generations!.findIndex(g => g.id === id);
-      if (genIndex !== -1) {
-        const existing = db.users[userIndex].generations![genIndex];
-        
-        let versions = existing.versions || [];
-        if (versions.length === 0) {
-          // Backfill backwards compatibility
-          versions = [{
-            id: crypto.randomUUID(),
-            tone: existing.tone || "Professional",
-            length: existing.length || "Medium",
-            format: existing.format || "Deep Dive",
-            title: existing.title || "Version 1",
-            markdown: existing.markdown || "",
-            seo: existing.seo || {},
-            createdAt: existing.createdAt || new Date().toISOString()
-          }];
-        }
+    const { data: created, error: createError } = await supabaseAdmin
+      .from("generations")
+      .insert(newGenRow)
+      .select()
+      .single();
 
-        const updatedGen: Generation = {
-          ...existing,
-          ...genData,
-          versions: [...versions, newVersion],
-          activeVersionId: newVersionId
-        };
-        db.users[userIndex].generations![genIndex] = updatedGen;
-        writeDb(db);
-        return { generation: updatedGen, isUpdate: true };
-      }
+    if (createError || !created) {
+      console.error("Failed to create generation row in Supabase:", createError);
+      throw new Error("Failed to save generation");
     }
 
-    const newGen: Generation = {
-      id: crypto.randomUUID(),
-      ...genData,
-      versions: [newVersion],
-      activeVersionId: newVersionId,
-      createdAt: new Date().toISOString()
+    await insertVersion(newGenId);
+
+    const returnedGen = {
+      id: created.id,
+      url: created.url,
+      tone: created.tone,
+      length: created.length,
+      format: created.format,
+      title: created.title,
+      markdown: created.markdown,
+      seo: created.seo,
+      workspaceId: created.workspace_id || undefined,
+      activeVersionId: created.active_version_id || undefined,
+      createdAt: created.created_at,
+      versions: [{
+        id: newVersionId,
+        tone: genData.tone,
+        length: genData.length,
+        format: genData.format,
+        title: genData.title,
+        markdown: genData.markdown,
+        seo: genData.seo || {},
+        createdAt: new Date().toISOString()
+      }]
     };
 
-    db.users[userIndex].generations!.push(newGen);
-    writeDb(db);
-
-    return { generation: newGen, isUpdate: false };
+    return { generation: returnedGen, isUpdate: false };
   });
 
 export const updateGenerationContent = createServerFn({ method: "POST" })
@@ -410,54 +448,73 @@ export const updateGenerationContent = createServerFn({ method: "POST" })
   }).parse(data))
   .handler(async ({ data }) => {
     const { userId, genId, versionId, markdown, title, seo } = data;
-    const db = readDb();
-    const userIndex = db.users.findIndex(u => u.id === userId);
-    if (userIndex === -1) throw new Error("User not found");
 
-    if (!db.users[userIndex].generations) db.users[userIndex].generations = [];
-    const gens = db.users[userIndex].generations!;
-    const genIndex = gens.findIndex(g => g.id === genId);
-    if (genIndex !== -1) {
-      const existing = gens[genIndex];
-      existing.markdown = markdown;
-      if (title) existing.title = title;
-      if (seo) existing.seo = seo;
+    const genUpdates: any = { markdown };
+    if (title) genUpdates.title = title;
+    if (seo) genUpdates.seo = seo;
 
-      if (existing.versions && existing.versions.length > 0) {
-        const vId = versionId || existing.activeVersionId;
-        existing.versions = existing.versions.map((v: any) => {
-          if (v.id === vId) {
-            return {
-              ...v,
-              markdown,
-              title: title || v.title,
-              seo: seo || v.seo
-            };
-          }
-          return v;
-        });
-      }
-      db.users[userIndex].generations![genIndex] = existing;
-      writeDb(db);
-      return { success: true, generation: existing };
+    const { data: updatedGen } = await supabaseAdmin
+      .from("generations")
+      .update(genUpdates)
+      .eq("id", genId)
+      .select()
+      .maybeSingle();
+
+    if (!updatedGen) return { success: false, error: "Generation not found" };
+
+    const vId = versionId || updatedGen.active_version_id;
+    if (vId) {
+      const verUpdates: any = { markdown };
+      if (title) verUpdates.title = title;
+      if (seo) verUpdates.seo = seo;
+
+      await supabaseAdmin
+        .from("generation_versions")
+        .update(verUpdates)
+        .eq("id", vId);
     }
-    return { success: false, error: "Generation not found" };
-  });
 
+    // Re-fetch all versions for active list sync
+    const { data: dbVersions } = await supabaseAdmin
+      .from("generation_versions")
+      .select("*")
+      .eq("generation_id", genId)
+      .order("created_at", { ascending: true });
+
+    const mappedVersions = (dbVersions || []).map((v: any) => ({
+      id: v.id,
+      tone: v.tone,
+      length: v.length,
+      format: v.format,
+      title: v.title,
+      markdown: v.markdown,
+      seo: v.seo,
+      createdAt: v.created_at
+    }));
+
+    const returnedGen = {
+      id: updatedGen.id,
+      url: updatedGen.url,
+      tone: updatedGen.tone,
+      length: updatedGen.length,
+      format: updatedGen.format,
+      title: updatedGen.title,
+      markdown: updatedGen.markdown,
+      seo: updatedGen.seo,
+      workspaceId: updatedGen.workspace_id || undefined,
+      activeVersionId: updatedGen.active_version_id || undefined,
+      createdAt: updatedGen.created_at,
+      versions: mappedVersions
+    };
+
+    return { success: true, generation: returnedGen };
+  });
 
 export const deleteGenerationHistory = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => z.object({ userId: z.string(), genId: z.string() }).parse(data))
   .handler(async ({ data }) => {
-    const { userId, genId } = data;
-    const db = readDb();
-    const userIndex = db.users.findIndex(u => u.id === userId);
-    if (userIndex === -1) throw new Error("User not found");
-
-    const gens = db.users[userIndex].generations || [];
-    const filtered = gens.filter(g => g.id !== genId);
-    db.users[userIndex].generations = filtered;
-    writeDb(db);
-
+    const { genId } = data;
+    await supabaseAdmin.from("generations").delete().eq("id", genId);
     return { success: true };
   });
 
@@ -465,44 +522,36 @@ export const createWorkspaceFolder = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => z.object({ userId: z.string(), name: z.string() }).parse(data))
   .handler(async ({ data }) => {
     const { userId, name } = data;
-    const db = readDb();
-    const userIndex = db.users.findIndex(u => u.id === userId);
-    if (userIndex === -1) throw new Error("User not found");
 
-    const newWs: Workspace = {
-      id: crypto.randomUUID(),
+    const newWs = {
+      user_id: userId,
       name
     };
 
-    if (!db.users[userIndex].workspaces) db.users[userIndex].workspaces = [];
-    db.users[userIndex].workspaces!.push(newWs);
-    writeDb(db);
+    const { data: created, error } = await supabaseAdmin
+      .from("workspaces")
+      .insert(newWs)
+      .select()
+      .single();
 
-    return { workspace: newWs };
+    if (error || !created) {
+      console.error("Failed to create workspace:", error);
+      throw new Error("Failed to create workspace folder");
+    }
+
+    return {
+      workspace: {
+        id: created.id,
+        name: created.name
+      }
+    };
   });
 
 export const deleteWorkspaceFolder = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => z.object({ userId: z.string(), wsId: z.string() }).parse(data))
   .handler(async ({ data }) => {
-    const { userId, wsId } = data;
-    const db = readDb();
-    const userIndex = db.users.findIndex(u => u.id === userId);
-    if (userIndex === -1) throw new Error("User not found");
-
-    // Remove workspace
-    db.users[userIndex].workspaces = (db.users[userIndex].workspaces || []).filter(w => w.id !== wsId);
-    
-    // Also disconnect any generations in this workspace
-    if (db.users[userIndex].generations) {
-      db.users[userIndex].generations = db.users[userIndex].generations!.map(g => {
-        if (g.workspaceId === wsId) {
-          return { ...g, workspaceId: undefined };
-        }
-        return g;
-      });
-    }
-
-    writeDb(db);
+    const { wsId } = data;
+    await supabaseAdmin.from("workspaces").delete().eq("id", wsId);
     return { success: true };
   });
 
@@ -515,54 +564,56 @@ export const createCustomTemplate = createServerFn({ method: "POST" })
     format: z.string()
   }).parse(data))
   .handler(async ({ data }) => {
-    const { userId, ...tplData } = data;
-    const db = readDb();
-    const userIndex = db.users.findIndex(u => u.id === userId);
-    if (userIndex === -1) throw new Error("User not found");
+    const { userId, name, tone, length, format } = data;
 
-    const newTpl: Template = {
-      id: crypto.randomUUID(),
-      ...tplData
+    const newTpl = {
+      user_id: userId,
+      name,
+      tone,
+      length,
+      format
     };
 
-    if (!db.users[userIndex].templates) db.users[userIndex].templates = [];
-    db.users[userIndex].templates!.push(newTpl);
-    writeDb(db);
+    const { data: created, error } = await supabaseAdmin
+      .from("templates")
+      .insert(newTpl)
+      .select()
+      .single();
 
-    return { template: newTpl };
+    if (error || !created) {
+      console.error("Failed to create custom template in Supabase:", error);
+      throw new Error("Failed to create custom template");
+    }
+
+    return {
+      template: {
+        id: created.id,
+        name: created.name,
+        tone: created.tone,
+        length: created.length,
+        format: created.format
+      }
+    };
   });
 
 export const deleteCustomTemplate = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => z.object({ userId: z.string(), templateId: z.string() }).parse(data))
   .handler(async ({ data }) => {
-    const { userId, templateId } = data;
-    const db = readDb();
-    const userIndex = db.users.findIndex(u => u.id === userId);
-    if (userIndex === -1) throw new Error("User not found");
-
-    db.users[userIndex].templates = (db.users[userIndex].templates || []).filter(t => t.id !== templateId);
-    writeDb(db);
-
+    const { templateId } = data;
+    await supabaseAdmin.from("templates").delete().eq("id", templateId);
     return { success: true };
   });
 
 export const moveGenerationWorkspace = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => z.object({ userId: z.string(), genId: z.string(), wsId: z.string().nullable() }).parse(data))
   .handler(async ({ data }) => {
-    const { userId, genId, wsId } = data;
-    const db = readDb();
-    const userIndex = db.users.findIndex(u => u.id === userId);
-    if (userIndex === -1) throw new Error("User not found");
+    const { genId, wsId } = data;
 
-    if (db.users[userIndex].generations) {
-      db.users[userIndex].generations = db.users[userIndex].generations!.map(g => {
-        if (g.id === genId) {
-          return { ...g, workspaceId: wsId || undefined };
-        }
-        return g;
-      });
-    }
-    writeDb(db);
+    await supabaseAdmin
+      .from("generations")
+      .update({ workspace_id: wsId || null })
+      .eq("id", genId);
+
     return { success: true };
   });
 
@@ -682,30 +733,32 @@ export const updateUserIntegrations = createServerFn({ method: "POST" })
   }).parse(data))
   .handler(async ({ data }) => {
     const { id, devto, medium, hashnode } = data;
-    const db = readDb();
 
-    const userIndex = db.users.findIndex(u => u.id === id);
-    if (userIndex === -1) throw new Error("User not found");
-
-    db.users[userIndex].integrations = {
+    const integrations = {
       devto: devto || "",
       medium: medium || "",
-      hashnode: hashnode || "",
+      hashnode: hashnode || ""
     };
-    writeDb(db);
 
-    const email = db.users[userIndex].email;
-    const fullName = db.users[userIndex].fullName;
-    const plan = db.users[userIndex].plan ?? "Free";
+    const { data: updatedProfile, error } = await supabaseAdmin
+      .from("profiles")
+      .update({ integrations })
+      .eq("user_id", id)
+      .select()
+      .single();
+
+    if (error || !updatedProfile) {
+      throw new Error("User not found or failed to update integrations");
+    }
 
     return {
       user: {
         id,
-        email,
+        email: updatedProfile.email,
         user_metadata: {
-          full_name: fullName,
-          plan,
-          integrations: db.users[userIndex].integrations || { devto: "", medium: "", hashnode: "" }
+          full_name: updatedProfile.full_name,
+          plan: updatedProfile.plan || "Free",
+          integrations: updatedProfile.integrations || { devto: "", medium: "", hashnode: "" }
         }
       }
     };

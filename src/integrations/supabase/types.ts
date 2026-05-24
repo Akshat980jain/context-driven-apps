@@ -23,6 +23,8 @@ export type Database = {
           plan: string
           updated_at: string
           user_id: string
+          password_hash: string | null
+          integrations: Json
         }
         Insert: {
           created_at?: string
@@ -32,6 +34,8 @@ export type Database = {
           plan?: string
           updated_at?: string
           user_id: string
+          password_hash?: string | null
+          integrations?: Json
         }
         Update: {
           created_at?: string
@@ -41,8 +45,185 @@ export type Database = {
           plan?: string
           updated_at?: string
           user_id?: string
+          password_hash?: string | null
+          integrations?: Json
         }
         Relationships: []
+      }
+      workspaces: {
+        Row: {
+          id: string
+          user_id: string
+          name: string
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          name: string
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          name?: string
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_workspaces_profiles"
+            columns: ["user_id"]
+            referencedRelation: "profiles"
+            referencedColumns: ["user_id"]
+          }
+        ]
+      }
+      generations: {
+        Row: {
+          id: string
+          user_id: string
+          url: string
+          tone: string
+          length: string
+          format: string
+          title: string
+          markdown: string
+          seo: Json
+          workspace_id: string | null
+          active_version_id: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          url: string
+          tone: string
+          length: string
+          format: string
+          title: string
+          markdown: string
+          seo?: Json
+          workspace_id?: string | null
+          active_version_id?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          url?: string
+          tone?: string
+          length?: string
+          format?: string
+          title?: string
+          markdown?: string
+          seo?: Json
+          workspace_id?: string | null
+          active_version_id?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_generations_profiles"
+            columns: ["user_id"]
+            referencedRelation: "profiles"
+            referencedColumns: ["user_id"]
+          },
+          {
+            foreignKeyName: "generations_workspace_id_fkey"
+            columns: ["workspace_id"]
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
+      generation_versions: {
+        Row: {
+          id: string
+          generation_id: string
+          tone: string
+          length: string
+          format: string
+          title: string
+          markdown: string
+          seo: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          generation_id: string
+          tone: string
+          length: string
+          format: string
+          title: string
+          markdown: string
+          seo?: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          generation_id?: string
+          tone?: string
+          length?: string
+          format?: string
+          title?: string
+          markdown?: string
+          seo?: Json
+          created_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "generation_versions_generation_id_fkey"
+            columns: ["generation_id"]
+            referencedRelation: "generations"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
+      templates: {
+        Row: {
+          id: string
+          user_id: string
+          name: string
+          tone: string
+          length: string
+          format: string
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          name: string
+          tone: string
+          length: string
+          format: string
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          name?: string
+          tone?: string
+          length?: string
+          format?: string
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_templates_profiles"
+            columns: ["user_id"]
+            referencedRelation: "profiles"
+            referencedColumns: ["user_id"]
+          }
+        ]
       }
     }
     Views: {
