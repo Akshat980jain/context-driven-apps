@@ -9,7 +9,8 @@ import { toast } from "sonner";
 import { User, Settings, Sparkles, UserCog, HelpCircle, Loader2, CheckCircle2, CreditCard, Lock, Smartphone, QrCode, Check, Globe } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useServerFn } from "@tanstack/react-start";
-import { updateUserProfile, deleteUserAccount, upgradeUserPlan, updateUserIntegrations } from "@/lib/auth.functions";
+import { useCustomDialog } from "@/hooks/use-custom-dialog";
+import { updateUserProfile, deleteUserAccount, upgradeUserPlan, updateUserIntegrations, updateUserBrandVoice } from "@/lib/auth.functions";
 export function SettingsModal({ 
   open, 
   onOpenChange, 
@@ -19,6 +20,7 @@ export function SettingsModal({
   onOpenChange: (open: boolean) => void;
   defaultTab?: string;
 }) {
+  const { showConfirm } = useCustomDialog();
   const [user, setUser] = useState<any>(null);
   const [fullName, setFullName] = useState("");
   const [saving, setSaving] = useState(false);
@@ -28,10 +30,21 @@ export function SettingsModal({
   const [hashnodeToken, setHashnodeToken] = useState("");
   const [savingIntegrations, setSavingIntegrations] = useState(false);
 
+  // Brand Voice State definitions
+  const [brandVoiceEnabled, setBrandVoiceEnabled] = useState(false);
+  const [bvDepth, setBvDepth] = useState(50);
+  const [bvExuberance, setBvExuberance] = useState(50);
+  const [bvDirectness, setBvDirectness] = useState(50);
+  const [bvPrefer, setBvPrefer] = useState("");
+  const [bvAvoid, setBvAvoid] = useState("");
+  const [bvSampleText, setBvSampleText] = useState("");
+  const [savingBrandVoice, setSavingBrandVoice] = useState(false);
+
   const updateFn = useServerFn(updateUserProfile);
   const deleteFn = useServerFn(deleteUserAccount);
   const upgradeFn = useServerFn(upgradeUserPlan);
   const updateIntegrationsFn = useServerFn(updateUserIntegrations);
+  const updateBrandVoiceFn = useServerFn(updateUserBrandVoice);
   const [deleting, setDeleting] = useState(false);
 
   const [showPayment, setShowPayment] = useState(false);
@@ -44,6 +57,18 @@ export function SettingsModal({
   const [upiId, setUpiId] = useState("");
   const [selectedUpiProvider, setSelectedUpiProvider] = useState<"gpay" | "phonepe" | "paytm" | "bhim" | "">("");
   const [paymentStatusText, setPaymentStatusText] = useState("Processing...");
+
+  const upiIdVal = upiId || "cgndgtgh";
+  const upiAppSuffixes: Record<string, string> = {
+    gpay: "okaxis",
+    phonepe: "ybl",
+    paytm: "paytm",
+    bhim: "upi"
+  };
+  const defaultSuffix = upiAppSuffixes[selectedUpiProvider] || "upi";
+  const fullUpiId = upiIdVal.includes("@") ? upiIdVal : `${upiIdVal}@${defaultSuffix}`;
+  const upiUrl = `upi://pay?pa=${encodeURIComponent(fullUpiId)}&pn=Scribe%20Pro&am=999&cu=INR`;
+  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(upiUrl)}`;
 
   const formatCardNumber = (value: string) => {
     const v = value.replace(/\s+/g, "").replace(/[^0-9]/gi, "");
@@ -80,9 +105,19 @@ export function SettingsModal({
       return;
     }
     // Downgrade to free
-    if (!window.confirm("Are you sure you want to downgrade to the Free plan? Your limit will be capped at 10 generations.")) return;
+    const confirmed = await showConfirm(
+      "Are you sure you want to downgrade to the Free plan? Your usage will be capped at 10 generations and workspaces.",
+      {
+        title: "Downgrade Subscription",
+        confirmText: "Yes, Downgrade",
+        cancelText: "Keep Pro",
+        isDestructive: true,
+      }
+    );
+    if (!confirmed) return;
     try {
-      const res = await upgradeFn({ data: { id: user.id, plan } });
+      const token = (await supabase.auth.getSession()).data.session?.access_token;
+      const res = await upgradeFn({ data: { id: user.id, plan, accessToken: token } });
       localStorage.setItem("custom_session", JSON.stringify(res.user));
       setUser(res.user);
       window.dispatchEvent(new Event("auth_changed"));
@@ -109,7 +144,8 @@ export function SettingsModal({
 
       setTimeout(async () => {
         try {
-          const res = await upgradeFn({ data: { id: user.id, plan: "Pro" } });
+          const token = (await supabase.auth.getSession()).data.session?.access_token;
+          const res = await upgradeFn({ data: { id: user.id, plan: "Pro", accessToken: token } });
           localStorage.setItem("custom_session", JSON.stringify(res.user));
           setUser(res.user);
           window.dispatchEvent(new Event("auth_changed"));
@@ -160,7 +196,8 @@ export function SettingsModal({
 
       setTimeout(async () => {
         try {
-          const res = await upgradeFn({ data: { id: user.id, plan: "Pro" } });
+          const token = (await supabase.auth.getSession()).data.session?.access_token;
+          const res = await upgradeFn({ data: { id: user.id, plan: "Pro", accessToken: token } });
           localStorage.setItem("custom_session", JSON.stringify(res.user));
           setUser(res.user);
           window.dispatchEvent(new Event("auth_changed"));
@@ -190,12 +227,43 @@ export function SettingsModal({
         setDevtoKey(ints.devto || "");
         setMediumToken(ints.medium || "");
         setHashnodeToken(ints.hashnode || "");
+
+        // Load Brand Voice from user metadata
+        const bv = u.user_metadata?.brand_voice || {};
+        setBrandVoiceEnabled(bv.enabled || false);
+        setBvDepth(bv.sliders?.depth ?? 50);
+        setBvExuberance(bv.sliders?.exuberance ?? 50);
+        setBvDirectness(bv.sliders?.directness ?? 50);
+        setBvPrefer(bv.vocabulary?.prefer || "");
+        setBvAvoid(bv.vocabulary?.avoid || "");
+        setBvSampleText(bv.sampleText || "");
       } else {
         setUser(null);
         setFullName("");
         setDevtoKey("");
         setMediumToken("");
         setHashnodeToken("");
+
+        // Guest local storage fallback
+        const localBv = localStorage.getItem("guest_brand_voice");
+        if (localBv) {
+          const bv = JSON.parse(localBv);
+          setBrandVoiceEnabled(bv.enabled || false);
+          setBvDepth(bv.sliders?.depth ?? 50);
+          setBvExuberance(bv.sliders?.exuberance ?? 50);
+          setBvDirectness(bv.sliders?.directness ?? 50);
+          setBvPrefer(bv.vocabulary?.prefer || "");
+          setBvAvoid(bv.vocabulary?.avoid || "");
+          setBvSampleText(bv.sampleText || "");
+        } else {
+          setBrandVoiceEnabled(false);
+          setBvDepth(50);
+          setBvExuberance(50);
+          setBvDirectness(50);
+          setBvPrefer("");
+          setBvAvoid("");
+          setBvSampleText("");
+        }
       }
     }
   }, [open]);
@@ -207,12 +275,14 @@ export function SettingsModal({
     }
     setSavingIntegrations(true);
     try {
+      const token = (await supabase.auth.getSession()).data.session?.access_token;
       const res = await updateIntegrationsFn({
         data: {
           id: user.id,
           devto: devtoKey,
           medium: mediumToken,
           hashnode: hashnodeToken,
+          accessToken: token
         }
       });
       localStorage.setItem("custom_session", JSON.stringify(res.user));
@@ -231,7 +301,8 @@ export function SettingsModal({
     if (!user) return;
     setSaving(true);
     try {
-      const res = await updateFn({ data: { id: user.id, fullName } });
+      const token = (await supabase.auth.getSession()).data.session?.access_token;
+      const res = await updateFn({ data: { id: user.id, fullName, accessToken: token } });
       // Update local storage
       localStorage.setItem("custom_session", JSON.stringify(res.user));
       setUser(res.user);
@@ -247,13 +318,66 @@ export function SettingsModal({
     }
   };
 
+  const saveBrandVoice = async () => {
+    const bvData = {
+      enabled: brandVoiceEnabled,
+      vocabulary: {
+        prefer: bvPrefer,
+        avoid: bvAvoid
+      },
+      sliders: {
+        depth: Number(bvDepth),
+        exuberance: Number(bvExuberance),
+        directness: Number(bvDirectness)
+      },
+      sampleText: bvSampleText
+    };
+
+    setSavingBrandVoice(true);
+    try {
+      if (user) {
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
+        const res = await updateBrandVoiceFn({
+          data: {
+            id: user.id,
+            brandVoice: bvData,
+            accessToken: token
+          }
+        });
+        localStorage.setItem("custom_session", JSON.stringify(res.user));
+        setUser(res.user);
+        
+        window.dispatchEvent(new Event("auth_changed"));
+        toast.success("Brand Voice Clone saved to cloud profile successfully!");
+      } else {
+        localStorage.setItem("guest_brand_voice", JSON.stringify(bvData));
+        window.dispatchEvent(new Event("auth_changed"));
+        toast.success("Brand Voice Clone saved locally to guest browser!");
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save Brand Voice settings");
+    } finally {
+      setSavingBrandVoice(false);
+    }
+  };
+
   const deleteAccount = async () => {
     if (!user) return;
-    if (!window.confirm("Are you sure you want to completely delete your account? This action cannot be undone.")) return;
+    const confirmed = await showConfirm(
+      "Are you sure you want to permanently delete your account? All of your saved custom templates, workspace folders, and generation history will be lost forever. This action cannot be undone.",
+      {
+        title: "Permanently Delete Account",
+        confirmText: "Delete My Account",
+        cancelText: "Cancel",
+        isDestructive: true,
+      }
+    );
+    if (!confirmed) return;
     
     setDeleting(true);
     try {
-      await deleteFn({ data: { id: user.id } });
+      const token = (await supabase.auth.getSession()).data.session?.access_token;
+      await deleteFn({ data: { id: user.id, accessToken: token } });
       localStorage.removeItem("custom_session");
       window.dispatchEvent(new Event("auth_changed"));
       onOpenChange(false);
@@ -337,45 +461,164 @@ export function SettingsModal({
                 </div>
               </TabsContent>
 
-              {/* Personalization */}
+              {/* Personalization / Brand Voice Studio */}
               <TabsContent value="personalization" className="m-0 space-y-6 outline-none">
-                <DialogHeader className="mb-6">
-                  <DialogTitle className="text-xl font-medium text-foreground">Personalization</DialogTitle>
-                  <DialogDescription className="text-muted-foreground">Customize how your default AI generations are formatted.</DialogDescription>
+                <DialogHeader className="mb-4">
+                  <DialogTitle className="text-xl font-medium text-foreground flex items-center gap-2">
+                    <UserCog className="size-5 text-accent animate-pulse" />
+                    Multi-Modal Brand Voice Clone
+                  </DialogTitle>
+                  <DialogDescription className="text-muted-foreground">
+                    Train a custom AI writing persona. Scribe will mimic your exact tone parameters, vocabulary choices, and sentence rhythm during blog post generation.
+                  </DialogDescription>
                 </DialogHeader>
 
-                <div className="space-y-6 max-w-md">
-                  <div className="space-y-2">
-                    <Label className="text-sm font-medium text-foreground">Default Tone</Label>
-                    <Select defaultValue="Professional">
-                      <SelectTrigger className="w-full bg-background/50 border-border">
-                        <SelectValue placeholder="Select a tone" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-card border-border text-foreground">
-                        <SelectItem value="Professional">Professional</SelectItem>
-                        <SelectItem value="Casual">Casual</SelectItem>
-                        <SelectItem value="Technical">Technical</SelectItem>
-                      </SelectContent>
-                    </Select>
+                <div className="space-y-5 pb-6">
+                  {/* Status Toggle Card */}
+                  <div className={`p-4 rounded-xl border transition-all duration-300 ${brandVoiceEnabled ? 'bg-accent/10 border-accent/30 shadow-soft' : 'bg-background/40 border-border/40'}`}>
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-1 pr-4">
+                        <Label className="text-sm font-semibold text-foreground flex items-center gap-1.5">
+                          🎙️ Voice Cloning Status
+                        </Label>
+                        <p className="text-xs text-muted-foreground">
+                          {brandVoiceEnabled 
+                            ? "Active — Scribe will apply your personal clone signature to new blog generations." 
+                            : "Inactive — Generations will default to standard tone selections."}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setBrandVoiceEnabled(!brandVoiceEnabled)}
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${brandVoiceEnabled ? 'bg-accent' : 'bg-muted'}`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block size-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${brandVoiceEnabled ? 'translate-x-5' : 'translate-x-0'}`}
+                        />
+                      </button>
+                    </div>
                   </div>
-                  
-                  <div className="space-y-2">
-                    <Label className="text-sm font-medium text-foreground">Default Format</Label>
-                    <Select defaultValue="Deep Dive">
-                      <SelectTrigger className="w-full bg-background/50 border-border">
-                        <SelectValue placeholder="Select a format" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-card border-border text-foreground">
-                        <SelectItem value="Deep Dive">Deep Dive</SelectItem>
-                        <SelectItem value="Listicle">Listicle</SelectItem>
-                        <SelectItem value="Summary">Summary</SelectItem>
-                      </SelectContent>
-                    </Select>
+
+                  {/* Sliders Grid */}
+                  <div className="space-y-4 bg-background/30 p-5 rounded-xl border border-border/40">
+                    <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Style Dimension Vectors</h3>
+                    
+                    {/* Technical Depth */}
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between text-xs">
+                        <Label className="font-medium text-foreground">Technical Depth</Label>
+                        <span className="text-accent font-semibold">{bvDepth}% ({bvDepth < 30 ? "Beginner" : bvDepth > 70 ? "Advanced Developer" : "Balanced"})</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="100" 
+                        value={bvDepth} 
+                        onChange={(e) => setBvDepth(Number(e.target.value))}
+                        className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-accent" 
+                      />
+                      <div className="flex justify-between text-[10px] text-muted-foreground/60 px-0.5">
+                        <span>Beginner-friendly</span>
+                        <span>Expert / Detailed</span>
+                      </div>
+                    </div>
+
+                    {/* Exuberance / Energy */}
+                    <div className="space-y-1.5 pt-2">
+                      <div className="flex justify-between text-xs">
+                        <Label className="font-medium text-foreground">Exuberance & Humor</Label>
+                        <span className="text-accent font-semibold">{bvExuberance}% ({bvExuberance < 30 ? "Academic" : bvExuberance > 70 ? "Humorous / Casual" : "Warm"})</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="100" 
+                        value={bvExuberance} 
+                        onChange={(e) => setBvExuberance(Number(e.target.value))}
+                        className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-accent" 
+                      />
+                      <div className="flex justify-between text-[10px] text-muted-foreground/60 px-0.5">
+                        <span>Strict / Factual</span>
+                        <span>Casual / Highly Energetic</span>
+                      </div>
+                    </div>
+
+                    {/* Directness / Clarity */}
+                    <div className="space-y-1.5 pt-2">
+                      <div className="flex justify-between text-xs">
+                        <Label className="font-medium text-foreground">Directness & Pacing</Label>
+                        <span className="text-accent font-semibold">{bvDirectness}% ({bvDirectness < 30 ? "Storyteller" : bvDirectness > 70 ? "Brief / Bullets" : "Standard"})</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="100" 
+                        value={bvDirectness} 
+                        onChange={(e) => setBvDirectness(Number(e.target.value))}
+                        className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-accent" 
+                      />
+                      <div className="flex justify-between text-[10px] text-muted-foreground/60 px-0.5">
+                        <span>Narrative & Elaborate</span>
+                        <span>Ultra-Direct / Bulleted</span>
+                      </div>
+                    </div>
                   </div>
-                  
-                  <Button className="bg-secondary hover:bg-secondary/80 text-secondary-foreground font-medium">
-                    Save Preferences
-                  </Button>
+
+                  {/* Vocabulary Controls */}
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Preferred Terms</Label>
+                      <Input 
+                        value={bvPrefer} 
+                        onChange={(e) => setBvPrefer(e.target.value)}
+                        placeholder="e.g. robust, cryptographic, paradigm" 
+                        className="bg-background/50 border-border text-foreground text-xs h-10 focus-visible:ring-accent"
+                      />
+                      <p className="text-[10px] text-muted-foreground/70">Preferred words or developer jargon.</p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Avoided Buzzwords</Label>
+                      <Input 
+                        value={bvAvoid} 
+                        onChange={(e) => setBvAvoid(e.target.value)}
+                        placeholder="e.g. delve, game-changing, testament" 
+                        className="bg-background/50 border-border text-foreground text-xs h-10 focus-visible:ring-accent"
+                      />
+                      <p className="text-[10px] text-muted-foreground/70">AI patterns or phrases to ban.</p>
+                    </div>
+                  </div>
+
+                  {/* Prose Writing Sample */}
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <Label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Writing Style Sample</Label>
+                      <span className="text-[10px] text-muted-foreground/60">{bvSampleText.length} / 4000 chars</span>
+                    </div>
+                    <textarea
+                      value={bvSampleText}
+                      onChange={(e) => setBvSampleText(e.target.value.slice(0, 4000))}
+                      placeholder="Paste 1-3 paragraphs of your original newsletters, blogs, or video scripts. Scribe will analyze your sentence structures, exclamation choices, and prose rhythm to mirror your style."
+                      className="w-full min-h-[90px] max-h-[140px] p-3 rounded-xl border border-border bg-background/50 text-foreground text-xs focus:outline-none focus:ring-1 focus:ring-accent resize-y font-sans transition-all"
+                    />
+                  </div>
+
+                  {/* Action Button */}
+                  <div className="flex items-center justify-between pt-2">
+                    {!user && (
+                      <p className="text-[10px] text-accent font-medium">Guest mode: Saved locally to browser</p>
+                    )}
+                    {user && (
+                      <p className="text-[10px] text-muted-foreground/70">Synced securely to your encrypted cloud profile</p>
+                    )}
+                    <Button 
+                      onClick={saveBrandVoice} 
+                      disabled={savingBrandVoice}
+                      className="bg-accent hover:bg-accent/90 text-accent-foreground font-medium px-6"
+                    >
+                      {savingBrandVoice ? <Loader2 className="size-4 animate-spin mr-2" /> : null}
+                      Save Voice Clone
+                    </Button>
+                  </div>
                 </div>
               </TabsContent>
 
@@ -837,46 +1080,15 @@ export function SettingsModal({
               {/* QR Code Container */}
               <div className="flex flex-col items-center justify-center p-4 bg-background/50 border border-border/60 rounded-2xl relative overflow-hidden group">
                 <div className="absolute inset-0 bg-gradient-to-tr from-accent/5 via-transparent to-accent/5 opacity-50"></div>
-                <div className="relative p-3 bg-white rounded-xl shadow-lg border border-white mb-2 transition-transform duration-300 group-hover:scale-105">
-                  <svg className="size-32 text-slate-800" viewBox="0 0 100 100" fill="currentColor">
-                    <rect x="0" y="0" width="30" height="30" rx="4" fill="currentColor" />
-                    <rect x="5" y="5" width="20" height="20" rx="2" fill="white" />
-                    <rect x="10" y="10" width="10" height="10" rx="1" fill="currentColor" />
-                    
-                    <rect x="70" y="0" width="30" height="30" rx="4" fill="currentColor" />
-                    <rect x="75" y="5" width="20" height="20" rx="2" fill="white" />
-                    <rect x="80" y="10" width="10" height="10" rx="1" fill="currentColor" />
-                    
-                    <rect x="0" y="70" width="30" height="30" rx="4" fill="currentColor" />
-                    <rect x="5" y="75" width="20" height="20" rx="2" fill="white" />
-                    <rect x="10" y="80" width="10" height="10" rx="1" fill="currentColor" />
-                    
-                    <rect x="40" y="10" width="10" height="10" rx="1" fill="currentColor" />
-                    <rect x="55" y="10" width="5" height="15" rx="1" fill="currentColor" />
-                    <rect x="40" y="25" width="15" height="5" rx="0.5" fill="currentColor" />
-                    <rect x="50" y="35" width="10" height="10" rx="1" fill="currentColor" />
-                    
-                    <rect x="10" y="40" width="10" height="10" rx="1" fill="currentColor" />
-                    <rect x="25" y="40" width="15" height="5" rx="0.5" fill="currentColor" />
-                    <rect x="15" y="55" width="5" height="10" rx="1" fill="currentColor" />
-                    <rect x="35" y="50" width="10" height="10" rx="1" fill="currentColor" />
-                    
-                    <rect x="70" y="40" width="10" height="10" rx="1" fill="currentColor" />
-                    <rect x="85" y="40" width="10" height="5" rx="0.5" fill="currentColor" />
-                    <rect x="75" y="55" width="15" height="10" rx="1" fill="currentColor" />
-                    <rect x="65" y="50" width="5" height="5" rx="1" fill="currentColor" />
-                    
-                    <rect x="40" y="70" width="10" height="15" rx="1" fill="currentColor" />
-                    <rect x="55" y="70" width="10" height="10" rx="1" fill="currentColor" />
-                    <rect x="40" y="90" width="25" height="5" rx="0.5" fill="currentColor" />
-                    <rect x="70" y="70" width="5" height="15" rx="1" fill="currentColor" />
-                    <rect x="80" y="75" width="10" height="10" rx="1" fill="currentColor" />
-                    <rect x="85" y="90" width="10" height="5" rx="1" fill="currentColor" />
-                    
-                    <rect x="40" y="40" width="20" height="20" rx="3" fill="white" />
-                    <circle cx="50" cy="50" r="7" fill="#ea580c" />
-                    <polygon points="48,46 54,50 48,54" fill="white" />
-                  </svg>
+                <div className="relative p-3 bg-white rounded-xl shadow-lg border border-white mb-2 transition-transform duration-300 group-hover:scale-105 size-36 flex items-center justify-center">
+                  <img
+                    src={qrCodeUrl}
+                    alt="UPI Scan QR"
+                    className="size-32 object-contain"
+                    onError={(e) => {
+                      e.currentTarget.src = `https://quickchart.io/chart?cht=qr&chs=200x200&chl=${encodeURIComponent(upiUrl)}`;
+                    }}
+                  />
                 </div>
                 <span className="text-[10px] font-semibold text-muted-foreground tracking-wider uppercase flex items-center gap-1.5">
                   <QrCode className="size-3 text-accent animate-pulse" />

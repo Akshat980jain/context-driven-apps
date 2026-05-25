@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Share2, Twitter, Linkedin, Mail, Copy, CheckCircle2, Loader2, X } from "lucide-react";
 import { toast } from "sonner";
+import { useCustomDialog } from "@/hooks/use-custom-dialog";
 
 interface RepurposeDropdownProps {
   markdown: string;
@@ -61,6 +62,7 @@ const PLATFORMS: Array<{
 ];
 
 export function RepurposeDropdown({ markdown, seo }: RepurposeDropdownProps) {
+  const { showAlert } = useCustomDialog();
   const [resultOpen, setResultOpen] = useState(false);
   const [resultContent, setResultContent] = useState("");
   const [resultPlatform, setResultPlatform] = useState<Platform | null>(null);
@@ -102,6 +104,12 @@ export function RepurposeDropdown({ markdown, seo }: RepurposeDropdownProps) {
       } else {
         toast.success(`${platformLabel} generated!`, { id: toastId, duration: 3000 });
         setResultContent(result.content);
+        
+        showAlert(`Your blog post has been successfully repurposed into a ${platformLabel}!`, {
+          title: "Repurposing Successful",
+          confirmText: "View Post",
+          icon: "success"
+        });
       }
     } catch (err) {
       toast.error("Repurpose failed. Please try again.", { id: toastId });
@@ -116,6 +124,13 @@ export function RepurposeDropdown({ markdown, seo }: RepurposeDropdownProps) {
     setCopied(true);
     toast.success("Copied to clipboard!");
     setTimeout(() => setCopied(false), 1500);
+
+    const platformLabel = PLATFORMS.find((p) => p.key === resultPlatform)?.label || "content";
+    showAlert(`The generated ${platformLabel} has been copied to your clipboard!`, {
+      title: "Copied successfully",
+      confirmText: "Awesome",
+      icon: "success"
+    });
   };
 
   const platformConfig = PLATFORMS.find((p) => p.key === resultPlatform);

@@ -25,6 +25,7 @@ export type Database = {
           user_id: string
           password_hash: string | null
           integrations: Json
+          brand_voice: Json
         }
         Insert: {
           created_at?: string
@@ -36,6 +37,7 @@ export type Database = {
           user_id: string
           password_hash?: string | null
           integrations?: Json
+          brand_voice?: Json
         }
         Update: {
           created_at?: string
@@ -47,6 +49,7 @@ export type Database = {
           user_id?: string
           password_hash?: string | null
           integrations?: Json
+          brand_voice?: Json
         }
         Relationships: []
       }

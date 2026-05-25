@@ -113,6 +113,25 @@ export function BatchQueue({
       `Processing ${validUrls.length} video${validUrls.length > 1 ? "s" : ""}...`
     );
 
+    // Retrieve active Brand Voice Clone settings if enabled
+    let activeBvData: any = undefined;
+    const stored = localStorage.getItem("custom_session");
+    if (stored) {
+      const u = JSON.parse(stored);
+      const bv = u.user_metadata?.brand_voice;
+      if (bv && bv.enabled) {
+        activeBvData = bv;
+      }
+    } else {
+      const guestBv = localStorage.getItem("guest_brand_voice");
+      if (guestBv) {
+        const parsed = JSON.parse(guestBv);
+        if (parsed.enabled) {
+          activeBvData = parsed;
+        }
+      }
+    }
+
     try {
       // Mark first item as processing
       setItems((prev) =>
@@ -125,6 +144,7 @@ export function BatchQueue({
           tone,
           length,
           format,
+          brandVoice: activeBvData,
         },
       });
 

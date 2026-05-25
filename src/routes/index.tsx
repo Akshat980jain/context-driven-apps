@@ -1,10 +1,12 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useCustomDialog } from "@/hooks/use-custom-dialog";
 import { useServerFn } from "@tanstack/react-start";
 import { convertVideo } from "@/lib/convert.functions";
 import { supabase } from "@/integrations/supabase/client";
 import { useEffect, useState, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 import { SettingsModal } from "@/components/SettingsModal";
 import { SupportChat } from "@/components/SupportChat";
 import { InlineEditor } from "@/components/InlineEditor";
@@ -24,7 +26,9 @@ import {
   deleteWorkspaceFolder, 
   createCustomTemplate, 
   deleteCustomTemplate,
-  moveGenerationWorkspace
+  moveGenerationWorkspace,
+  publishContentToPlatform,
+  updateUserBrandVoice
 } from "@/lib/auth.functions";
 import { Label } from "@/components/ui/label";
 import {
@@ -111,11 +115,13 @@ const STEPS = [
 ] as const;
 
 function Index() {
+  const { showConfirm, showPrompt, showAlert } = useCustomDialog();
   const run = useServerFn(convertVideo);
   const [url, setUrl] = useState("");
   const [tone, setTone] = useState<Tone>("Professional");
   const [length, setLength] = useState<Length>("Medium");
   const [format, setFormat] = useState<BlogFormat>("Deep Dive");
+  const [useBrandVoice, setUseBrandVoice] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [stepIdx, setStepIdx] = useState(-1);
@@ -143,6 +149,10 @@ function Index() {
   const [view, setView] = useState<"preview" | "markdown" | "editor">("preview");
   const [batchOpen, setBatchOpen] = useState(false);
   const articleRef = useRef<HTMLElement>(null);
+
+  const usageCount = useMemo(() => {
+    return generations.length + workspaces.length;
+  }, [generations, workspaces]);
 
   const activeGen = useMemo(() => {
     return generations.find(g => g.id === selectedGenId) || null;
@@ -192,6 +202,8 @@ function Index() {
   const deleteTplFn = useServerFn(deleteCustomTemplate);
   const moveGenWsFn = useServerFn(moveGenerationWorkspace);
   const updateGenContentFn = useServerFn(updateGenerationContent);
+  const publishContentFn = useServerFn(publishContentToPlatform);
+  const updateBrandVoiceFn = useServerFn(updateUserBrandVoice);
 
   useEffect(() => {
     const checkSession = () => {
@@ -207,16 +219,44 @@ function Index() {
     window.addEventListener("auth_changed", checkSession);
 
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user && !localStorage.getItem("custom_session")) {
-        setUser(session.user);
+      if (session?.user) {
+        const stored = localStorage.getItem("custom_session");
+        const existingMetadata = stored ? JSON.parse(stored).user_metadata || {} : {};
+        const customSession = {
+          id: session.user.id,
+          email: session.user.email,
+          user_metadata: {
+            full_name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "User",
+            plan: "Free",
+            integrations: { devto: "", medium: "", hashnode: "" },
+            ...existingMetadata
+          }
+        };
+        if (!localStorage.getItem("custom_session")) {
+          localStorage.setItem("custom_session", JSON.stringify(customSession));
+        }
+        setUser(customSession);
       }
     });
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user && !localStorage.getItem("custom_session")) {
-        setUser(session.user);
+      if (session?.user) {
+        const stored = localStorage.getItem("custom_session");
+        const existingMetadata = stored ? JSON.parse(stored).user_metadata || {} : {};
+        const customSession = {
+          id: session.user.id,
+          email: session.user.email,
+          user_metadata: {
+            full_name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "User",
+            plan: "Free",
+            integrations: { devto: "", medium: "", hashnode: "" },
+            ...existingMetadata
+          }
+        };
+        localStorage.setItem("custom_session", JSON.stringify(customSession));
+        setUser(customSession);
       }
     });
 
@@ -226,32 +266,51 @@ function Index() {
     };
   }, []);
 
+  // Synchronize active useBrandVoice toggle with configured brand_voice status
+  useEffect(() => {
+    if (user) {
+      setUseBrandVoice(user.user_metadata?.brand_voice?.enabled || false);
+    } else {
+      const guestBv = localStorage.getItem("guest_brand_voice");
+      if (guestBv) {
+        setUseBrandVoice(JSON.parse(guestBv).enabled || false);
+      } else {
+        setUseBrandVoice(false);
+      }
+    }
+  }, [user?.id]);
+
   // Load dashboard data whenever user changes
   useEffect(() => {
     const loadData = async () => {
       if (user) {
         try {
-          const res = await getDashboardFn({ data: { userId: user.id } });
+          const token = (await supabase.auth.getSession()).data.session?.access_token;
+          const res = await getDashboardFn({ data: { userId: user.id, accessToken: token } });
           setGenerations(res.generations || []);
           setWorkspaces(res.workspaces || []);
           setTemplates(res.templates || []);
 
-          // Sync real plan AND integrations from DB — ensures handlePublish always reads fresh keys
+          // Sync real plan, integrations, AND brand_voice from DB
           const freshPlan = res.plan || "Free";
           const freshIntegrations = res.integrations || { devto: "", medium: "", hashnode: "" };
+          const freshBrandVoice = res.brandVoice || { enabled: false, vocabulary: { prefer: "", avoid: "" }, sliders: { depth: 50, exuberance: 50, directness: 50 }, sampleText: "" };
           const currentPlan = user.user_metadata?.plan;
           const currentIntegrations = user.user_metadata?.integrations;
+          const currentBrandVoice = user.user_metadata?.brand_voice;
 
           const planChanged = currentPlan !== freshPlan;
           const integrationsChanged = JSON.stringify(currentIntegrations) !== JSON.stringify(freshIntegrations);
+          const brandVoiceChanged = JSON.stringify(currentBrandVoice) !== JSON.stringify(freshBrandVoice);
 
-          if (planChanged || integrationsChanged) {
+          if (planChanged || integrationsChanged || brandVoiceChanged) {
             const updatedUser = {
               ...user,
               user_metadata: {
                 ...(user.user_metadata || {}),
                 plan: freshPlan,
                 integrations: freshIntegrations,
+                brand_voice: freshBrandVoice,
               },
             };
             localStorage.setItem("custom_session", JSON.stringify(updatedUser));
@@ -294,12 +353,14 @@ function Index() {
     const { workspaceId, ...restGen } = gen;
     if (user) {
       try {
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
         const res = await saveGenFn({ 
           data: { 
             userId: user.id, 
             id: gen.id,
             ...restGen,
-            workspaceId: workspaceId || selectedWorkspaceId || undefined
+            workspaceId: workspaceId || selectedWorkspaceId || undefined,
+            accessToken: token
           } 
         });
         
@@ -314,6 +375,22 @@ function Index() {
           setSelectedGenId(resTyped.generation.id);
           setSelectedVersionId(resTyped.generation.activeVersionId);
           toast.success("Generation saved to your history!");
+        }
+
+        const targetWsId = workspaceId || selectedWorkspaceId;
+        const currentWs = workspaces.find(w => w.id === targetWsId);
+        if (currentWs) {
+          showAlert(`Your blog post "${restGen.title}" has been successfully saved in the "${currentWs.name}" workspace folder!`, {
+            title: "Saved to Workspace",
+            confirmText: "Awesome",
+            icon: "success"
+          });
+        } else {
+          showAlert(`Your blog post "${restGen.title}" has been saved to your history.`, {
+            title: "Saved to History",
+            confirmText: "Awesome",
+            icon: "success"
+          });
         }
       } catch (err) {
         console.error("Failed to save generation on backend", err);
@@ -363,6 +440,22 @@ function Index() {
         setGenerations(updated);
         localStorage.setItem("guest_generations", JSON.stringify(updated));
         toast.success("New regenerated version saved in guest history!");
+
+        const targetWsId = workspaceId || selectedWorkspaceId;
+        const currentWs = workspaces.find(w => w.id === targetWsId);
+        if (currentWs) {
+          showAlert(`Your blog post "${restGen.title}" has been successfully saved in the "${currentWs.name}" workspace folder!`, {
+            title: "Saved to Workspace",
+            confirmText: "Awesome",
+            icon: "success"
+          });
+        } else {
+          showAlert(`Your blog post "${restGen.title}" has been saved.`, {
+            title: "Version Saved",
+            confirmText: "Awesome",
+            icon: "success"
+          });
+        }
       } else {
         const newVersionId = crypto.randomUUID();
         const newVersion = {
@@ -389,16 +482,41 @@ function Index() {
         setSelectedVersionId(newVersionId);
         localStorage.setItem("guest_generations", JSON.stringify(updated));
         toast.success("Saved to local guest history!");
+
+        const targetWsId = workspaceId || selectedWorkspaceId;
+        const currentWs = workspaces.find(w => w.id === targetWsId);
+        if (currentWs) {
+          showAlert(`Your blog post "${restGen.title}" has been successfully saved in the "${currentWs.name}" workspace folder!`, {
+            title: "Saved to Workspace",
+            confirmText: "Awesome",
+            icon: "success"
+          });
+        } else {
+          showAlert(`Your blog post "${restGen.title}" has been saved to your local guest history.`, {
+            title: "Saved to History",
+            confirmText: "Awesome",
+            icon: "success"
+          });
+        }
       }
     }
   };
 
   const handleCreateWorkspace = async () => {
-    const name = window.prompt("Enter workspace folder name:");
+    if (!isPro && workspaces.length >= 1) {
+      toast.error("Free users are limited to 1 workspace folder. Please upgrade to Pro in Settings for unlimited folders!");
+      return;
+    }
+    const name = await showPrompt("Give your new workspace folder a name to organize your generations.", {
+      title: "Create Workspace Folder",
+      placeholder: "e.g. Tech Blog Articles",
+      confirmText: "Create Folder",
+    });
     if (!name || !name.trim()) return;
     if (user) {
       try {
-        const res = await createWsFn({ data: { userId: user.id, name: name.trim() } });
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
+        const res = await createWsFn({ data: { userId: user.id, name: name.trim(), accessToken: token } });
         setWorkspaces(prev => [...prev, res.workspace]);
         toast.success(`Workspace "${name}" created!`);
       } catch (err) {
@@ -415,10 +533,20 @@ function Index() {
 
   const handleDeleteWorkspace = async (wsId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!window.confirm("Delete this workspace folder? The generations will remain but will be removed from this folder.")) return;
+    const confirmed = await showConfirm(
+      "Are you sure you want to delete this workspace folder? The generations inside it will remain in your history but will be removed from this folder.",
+      {
+        title: "Delete Workspace",
+        confirmText: "Delete Workspace",
+        cancelText: "Keep Folder",
+        isDestructive: true,
+      }
+    );
+    if (!confirmed) return;
     if (user) {
       try {
-        await deleteWsFn({ data: { userId: user.id, wsId } });
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
+        await deleteWsFn({ data: { userId: user.id, wsId, accessToken: token } });
         setWorkspaces(prev => prev.filter(w => w.id !== wsId));
         setGenerations(prev => prev.map(g => g.workspaceId === wsId ? { ...g, workspaceId: undefined } : g));
         if (selectedWorkspaceId === wsId) setSelectedWorkspaceId(null);
@@ -440,12 +568,20 @@ function Index() {
   };
 
   const handleCreateTemplate = async () => {
-    const name = window.prompt("Enter template name:");
+    const name = await showPrompt(
+      "Give this template a name so you can quickly apply these settings to future video imports.",
+      {
+        title: "Save Config as Template",
+        placeholder: "e.g. My Weekly Newsletter",
+        confirmText: "Save Template",
+      }
+    );
     if (!name || !name.trim()) return;
     const tplData = { name: name.trim(), tone, length, format };
     if (user) {
       try {
-        const res = await createTplFn({ data: { userId: user.id, ...tplData } });
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
+        const res = await createTplFn({ data: { userId: user.id, ...tplData, accessToken: token } });
         setTemplates(prev => [...prev, res.template]);
         toast.success(`Template "${name}" created!`);
       } catch (err) {
@@ -462,10 +598,17 @@ function Index() {
 
   const handleDeleteTemplate = async (templateId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!window.confirm("Delete this template?")) return;
+    const confirmed = await showConfirm("Are you sure you want to delete this custom template?", {
+      title: "Delete Template",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      isDestructive: true,
+    });
+    if (!confirmed) return;
     if (user) {
       try {
-        await deleteTplFn({ data: { userId: user.id, templateId } });
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
+        await deleteTplFn({ data: { userId: user.id, templateId, accessToken: token } });
         setTemplates(prev => prev.filter(t => t.id !== templateId));
         toast.success("Template deleted");
       } catch (err) {
@@ -481,10 +624,20 @@ function Index() {
 
   const handleDeleteGeneration = async (genId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!window.confirm("Delete this generation from history?")) return;
+    const confirmed = await showConfirm(
+      "Are you sure you want to permanently delete this generation from your history? This action cannot be undone.",
+      {
+        title: "Delete Generation",
+        confirmText: "Delete Permanently",
+        cancelText: "Keep Generation",
+        isDestructive: true,
+      }
+    );
+    if (!confirmed) return;
     if (user) {
       try {
-        await deleteGenFn({ data: { userId: user.id, genId } });
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
+        await deleteGenFn({ data: { userId: user.id, genId, accessToken: token } });
         setGenerations(prev => prev.filter(g => g.id !== genId));
         if (selectedGenId === genId) {
           setSelectedGenId(null);
@@ -549,6 +702,7 @@ function Index() {
     const toastId = toast.loading("Saving changes to history...");
     if (user) {
       try {
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
         const res = await updateGenContentFn({
           data: {
             userId: user.id,
@@ -556,12 +710,19 @@ function Index() {
             versionId: selectedVersionId || undefined,
             markdown: newMd,
             title: activeVersion?.title,
-            seo: activeVersion?.seo
+            seo: activeVersion?.seo,
+            accessToken: token
           }
         });
         if (res.success && res.generation) {
           setGenerations(prev => prev.map(g => g.id === selectedGenId ? res.generation : g));
           toast.success("Draft saved successfully!", { id: toastId });
+          
+          showAlert(`Your draft modifications for "${activeVersion?.title || 'this blog post'}" have been successfully saved to Scribe!`, {
+            title: "Draft Saved Successfully",
+            confirmText: "Excellent",
+            icon: "success"
+          });
         } else {
           toast.error(res.error || "Failed to save draft", { id: toastId });
         }
@@ -589,6 +750,12 @@ function Index() {
       setGenerations(updated);
       localStorage.setItem("guest_generations", JSON.stringify(updated));
       toast.success("Saved locally to guest history!", { id: toastId });
+
+      showAlert(`Your draft modifications for "${activeVersion?.title || 'this blog post'}" have been saved locally to your guest history!`, {
+        title: "Draft Saved Locally",
+        confirmText: "Perfect",
+        icon: "success"
+      });
     }
   };
 
@@ -605,7 +772,8 @@ function Index() {
     
     if (user) {
       try {
-        await moveGenWsFn({ data: { userId: user.id, genId, wsId } });
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
+        await moveGenWsFn({ data: { userId: user.id, genId, wsId, accessToken: token } });
       } catch(err) {
         console.error(err);
       }
@@ -613,6 +781,63 @@ function Index() {
       localStorage.setItem("guest_generations", JSON.stringify(updatedGens));
     }
     toast.success("Moved generation");
+  };
+
+  const handleToggleBrandVoice = async () => {
+    const nextVal = !useBrandVoice;
+    setUseBrandVoice(nextVal);
+
+    if (user) {
+      const stored = localStorage.getItem("custom_session");
+      const currentMetadata = stored ? JSON.parse(stored).user_metadata || {} : {};
+      
+      const updatedBrandVoice = {
+        ...(currentMetadata.brand_voice || {
+          vocabulary: { prefer: "", avoid: "" },
+          sliders: { depth: 50, exuberance: 50, directness: 50 },
+          sampleText: ""
+        }),
+        enabled: nextVal
+      };
+
+      const updatedUser = {
+        ...user,
+        user_metadata: {
+          ...currentMetadata,
+          brand_voice: updatedBrandVoice
+        }
+      };
+
+      localStorage.setItem("custom_session", JSON.stringify(updatedUser));
+      setUser(updatedUser);
+      
+      window.dispatchEvent(new Event("auth_changed"));
+
+      try {
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
+        await updateBrandVoiceFn({
+          data: {
+            id: user.id,
+            brandVoice: updatedBrandVoice,
+            accessToken: token
+          }
+        });
+      } catch (err) {
+        console.error("Failed to sync brand voice toggle to database:", err);
+      }
+    } else {
+      const guestBv = localStorage.getItem("guest_brand_voice");
+      const currentGuestBv = guestBv ? JSON.parse(guestBv) : {
+        vocabulary: { prefer: "", avoid: "" },
+        sliders: { depth: 50, exuberance: 50, directness: 50 },
+        sampleText: ""
+      };
+      currentGuestBv.enabled = nextVal;
+      localStorage.setItem("guest_brand_voice", JSON.stringify(currentGuestBv));
+      window.dispatchEvent(new Event("auth_changed"));
+    }
+
+    toast.success(nextVal ? "Brand Voice Clone activated!" : "Brand Voice Clone deactivated.");
   };
 
   const displayName = user ? (user.user_metadata?.full_name || user.email?.split("@")[0] || "User") : "Guest User";
@@ -629,10 +854,22 @@ function Index() {
     e?.preventDefault();
     if (!validUrl || loading) return;
 
-    if (!isRegen && !isPro && generations.length >= 10) {
-      toast.error("You've reached your free generation limit of 10. Please upgrade to Pro in Settings for unlimited generations!");
-      setError("Free generation limit (10) reached. Upgrade to Pro for unlimited generations.");
+    if (!isRegen && !isPro && usageCount >= 10) {
+      toast.error("You've reached your free usage limit of 10 (generations + workspaces). Please upgrade to Pro in Settings for unlimited access!");
+      setError("Free usage limit (10) reached. Upgrade to Pro for unlimited access.");
       return;
+    }
+
+    if (isRegen && !isPro) {
+      if (selectedGenId) {
+        const gen = generations.find(g => g.id === selectedGenId);
+        const versionsCount = gen?.versions?.length || 0;
+        if (versionsCount >= 4) {
+          toast.error("Free users are limited to 3 regenerations per post. Please upgrade to Pro in Settings for unlimited regenerations!");
+          setError("Regeneration limit (3) reached. Upgrade to Pro for unlimited regenerations.");
+          return;
+        }
+      }
     }
 
     setLoading(true);
@@ -646,8 +883,37 @@ function Index() {
     }, 2500);
 
     try {
+      let activeBvData: any = undefined;
+      if (useBrandVoice) {
+        if (user) {
+          const bv = user.user_metadata?.brand_voice;
+          if (bv) {
+            activeBvData = { ...bv, enabled: true };
+          }
+        } else {
+          const guestBv = localStorage.getItem("guest_brand_voice");
+          if (guestBv) {
+            activeBvData = { ...JSON.parse(guestBv), enabled: true };
+          } else {
+            // Default guest fallback
+            activeBvData = {
+              enabled: true,
+              vocabulary: { prefer: "", avoid: "" },
+              sliders: { depth: 50, exuberance: 50, directness: 50 },
+              sampleText: ""
+            };
+          }
+        }
+      }
+
       const res = await run({
-        data: { url: url.trim(), tone, length, format },
+        data: { 
+          url: url.trim(), 
+          tone, 
+          length, 
+          format,
+          brandVoice: activeBvData
+        },
       });
       if (res.error) {
         setError(res.error);
@@ -691,15 +957,28 @@ function Index() {
     await navigator.clipboard.writeText(markdown);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
+
+    showAlert("The complete blog post markdown has been copied to your clipboard. You can now paste it directly into your CMS or text editor!", {
+      title: "Copied to Clipboard",
+      confirmText: "Got it",
+      icon: "success"
+    });
   };
 
   const download = (kind: "md" | "txt") => {
     const blob = new Blob([markdown], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `${(seo.title ?? "blog-post").replace(/[^\w-]+/g, "-").toLowerCase()}.${kind}`;
+    const fileName = `${(seo.title ?? "blog-post").replace(/[^\w-]+/g, "-").toLowerCase()}.${kind}`;
+    a.download = fileName;
     a.click();
     URL.revokeObjectURL(a.href);
+
+    showAlert(`Your blog post has been successfully downloaded as "${fileName}"!`, {
+      title: "Download Started",
+      confirmText: "Excellent",
+      icon: "success"
+    });
   };
 
   const handlePublish = async (platform: "devto" | "medium" | "hashnode") => {
@@ -733,33 +1012,40 @@ function Index() {
     const platformLabel = platform === "devto" ? "Dev.to" : platform === "medium" ? "Medium" : "Hashnode";
     const toastId = toast.loading(`Connecting to ${platformLabel} self-publishing API...`);
 
-    setTimeout(() => {
-      toast.loading(`Authenticating API token and parsing metadata...`, { id: toastId });
-    }, 1000);
-
-    setTimeout(() => {
-      toast.loading(`Pushing draft post "${seo.title || 'Untitled Post'}"...`, { id: toastId });
-    }, 2000);
-
-    setTimeout(() => {
-      const draftLinks: Record<string, string> = {
-        devto: "https://dev.to/dashboard",
-        medium: "https://medium.com/me/stories/drafts",
-        hashnode: "https://hashnode.com/dashboard"
-      };
-      const link = draftLinks[platform];
-
-      toast.success(`Draft published to ${platformLabel}! Click "Open Drafts" to view it.`, {
-        id: toastId,
-        duration: 8000,
-        action: {
-          label: "Open Drafts ↗",
-          onClick: () => {
-            window.open(link, "_blank", "noopener,noreferrer");
-          }
+    try {
+      const token = (await supabase.auth.getSession()).data.session?.access_token;
+      const result = await publishContentFn({
+        data: {
+          userId: user.id,
+          platform,
+          title: seo.title || "Untitled Post",
+          markdown,
+          tags: seo.tags || [],
+          accessToken: token
         }
       });
-    }, 3200);
+
+      if (result.success) {
+        toast.success(`Draft published to ${platformLabel}! Click "Open Drafts" to view it.`, {
+          id: toastId,
+          duration: 8000,
+          action: {
+            label: "Open Drafts ↗",
+            onClick: () => {
+              window.open(result.url, "_blank", "noopener,noreferrer");
+            }
+          }
+        });
+
+        showAlert(`Draft published successfully to ${platformLabel}! You can now open your ${platformLabel} drafts dashboard to review and schedule it.`, {
+          title: `Published to ${platformLabel}`,
+          confirmText: "Superb",
+          icon: "success"
+        });
+      }
+    } catch (err: any) {
+      toast.error(err.message || `Failed to publish draft to ${platformLabel}.`, { id: toastId });
+    }
   };
 
   return (
@@ -974,13 +1260,13 @@ function Index() {
           ) : (
             <div className="mb-4 px-2">
               <div className="flex justify-between text-xs mb-1.5">
-                <span className="text-muted-foreground">Generations</span>
-                <span className="font-medium text-muted-foreground">{generations.length} / 10</span>
+                <span className="text-muted-foreground">Generations & Workspaces</span>
+                <span className="font-medium text-muted-foreground">{usageCount} / 10</span>
               </div>
               <div className="h-1.5 w-full rounded-full bg-border overflow-hidden">
                 <div 
                   className="h-full bg-accent transition-all duration-500" 
-                  style={{ width: `${Math.min(100, (generations.length / 10) * 100)}%` }}
+                  style={{ width: `${Math.min(100, (usageCount / 10) * 100)}%` }}
                 ></div>
               </div>
               {!user && (
@@ -1107,10 +1393,41 @@ function Index() {
                 </div>
               </div>
 
-              <div className="grid gap-4 md:grid-cols-3">
-                <OptionSelect label="Tone" value={tone} onChange={(v) => setTone(v as Tone)} options={["Professional", "Casual", "Technical", "Educational"]} disabled={loading} />
+              <div className="grid gap-4 md:grid-cols-4">
+                <OptionSelect label="Tone" value={tone} onChange={(v) => setTone(v as Tone)} options={["Professional", "Casual", "Technical", "Educational"]} disabled={loading || useBrandVoice} />
                 <OptionSelect label="Length" value={length} onChange={(v) => setLength(v as Length)} options={["Short", "Medium", "Long"]} disabled={loading} />
                 <OptionSelect label="Format" value={format} onChange={(v) => setFormat(v as BlogFormat)} options={["How-to Guide", "Listicle", "Deep Dive", "Summary"]} disabled={loading} />
+                
+                {/* Brand Voice Toggle Card */}
+                <div className={`flex flex-col justify-between p-3.5 rounded-xl border backdrop-blur-sm transition-all duration-300 ${useBrandVoice ? 'bg-accent/10 border-accent/30 shadow-soft' : 'bg-background/40 border-border/40'}`}>
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-1.5 font-semibold">
+                      🎙️ Voice Clone
+                    </Label>
+                    <span className="relative flex size-2">
+                      <span className={`absolute inline-flex h-full w-full rounded-full opacity-75 animate-ping ${useBrandVoice ? 'bg-accent' : 'bg-muted-foreground/35'}`}></span>
+                      <span className={`relative inline-flex rounded-full size-2 ${useBrandVoice ? 'bg-accent' : 'bg-muted-foreground/50'}`}></span>
+                    </span>
+                  </div>
+                  
+                  <div className="flex items-center justify-between mt-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={handleToggleBrandVoice}
+                      className={`text-xs font-semibold px-3 py-1.5 rounded-lg border transition-all duration-200 ${useBrandVoice ? 'bg-accent/15 border-accent/30 text-accent' : 'bg-secondary/40 border-border/40 text-muted-foreground hover:bg-secondary/60 hover:text-foreground'}`}
+                      disabled={loading}
+                    >
+                      {useBrandVoice ? "Active" : "Off"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openSettings("personalization")}
+                      className="text-[10px] text-muted-foreground hover:text-accent hover:underline flex items-center gap-0.5"
+                    >
+                      Configure →
+                    </button>
+                  </div>
+                </div>
               </div>
 
               <div className="flex gap-3">
@@ -1319,7 +1636,7 @@ function Index() {
                 {view === "preview" ? (
                   <>
                     <article ref={articleRef} className="prose-blog">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{markdown}</ReactMarkdown>
                     </article>
                     <InlineEditor
                       markdown={markdown}
@@ -1374,7 +1691,7 @@ function Index() {
         onOpenChange={setBatchOpen}
         onSaveGeneration={(gen) => handleSaveGeneration(gen)}
         isPro={isPro}
-        generationCount={generations.length}
+        generationCount={usageCount}
       />
     </div>
   );

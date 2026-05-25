@@ -2,6 +2,138 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+// --- Cryptographic Security Helpers (SEC-02 & SEC-03) ---
+
+async function sha256(message: string): Promise<string> {
+  const msgBuffer = new TextEncoder().encode(message);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function toBase64Legacy(str: string): string {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(str).toString("base64");
+  }
+  const bytes = new TextEncoder().encode(str);
+  let binString = "";
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binString += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binString);
+}
+
+const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || "fallback-super-secret-key-scribe-2026";
+
+async function getEncryptionKey(): Promise<CryptoKey> {
+  const rawKey = new TextEncoder().encode(ENCRYPTION_SECRET.padEnd(32, '0').slice(0, 32));
+  return await crypto.subtle.importKey(
+    "raw",
+    rawKey,
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function encrypt(text: string): Promise<string> {
+  if (!text) return "";
+  const key = await getEncryptionKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(text);
+  
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoded
+  );
+  
+  const combined = new Uint8Array(iv.byteLength + encrypted.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(encrypted), iv.byteLength);
+  
+  return "enc:" + Array.from(combined).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function decrypt(cipherText: string): Promise<string> {
+  if (!cipherText) return "";
+  if (!cipherText.startsWith("enc:")) return cipherText;
+  
+  try {
+    const key = await getEncryptionKey();
+    const hex = cipherText.slice(4);
+    const matches = hex.match(/.{1,2}/g);
+    if (!matches) return "";
+    const combined = new Uint8Array(matches.map(byte => parseInt(byte, 16)));
+    
+    const iv = combined.slice(0, 12);
+    const encrypted = combined.slice(12);
+    
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      key,
+      encrypted
+    );
+    
+    return new TextDecoder().decode(decrypted);
+  } catch (err) {
+    console.error("AES-GCM decryption failed:", err);
+    return cipherText;
+  }
+}
+
+async function encryptIntegrations(integrations: any) {
+  const encrypted: any = {};
+  if (integrations) {
+    for (const key of ["devto", "medium", "hashnode"]) {
+      const val = integrations[key] || "";
+      if (val && !val.startsWith("enc:")) {
+        encrypted[key] = await encrypt(val);
+      } else {
+        encrypted[key] = val;
+      }
+    }
+  } else {
+    return { devto: "", medium: "", hashnode: "" };
+  }
+  return encrypted;
+}
+
+async function decryptIntegrations(integrations: any) {
+  const decrypted: any = {};
+  if (integrations) {
+    for (const key of ["devto", "medium", "hashnode"]) {
+      const val = integrations[key] || "";
+      if (val && val.startsWith("enc:")) {
+        decrypted[key] = await decrypt(val);
+      } else {
+        decrypted[key] = val;
+      }
+    }
+  } else {
+    return { devto: "", medium: "", hashnode: "" };
+  }
+  return decrypted;
+}
+
+// --- BOLA/IDOR JWT Session Verification Helper (SEC-01 & SEC-04) ---
+
+async function assertAuthorized(userId: string, accessToken?: string) {
+  if (!accessToken) {
+    throw new Error("Unauthorized: Access token missing.");
+  }
+  
+  const { data: { user }, error } = await supabaseAdmin.auth.getUser(accessToken);
+  if (error || !user) {
+    throw new Error(`Unauthorized: Invalid access token. ${error?.message || ""}`);
+  }
+  
+  if (user.id !== userId) {
+    throw new Error("Unauthorized: User ID mismatch.");
+  }
+}
+
+
 interface GenerationVersion {
   id: string;
   tone: string;
@@ -52,8 +184,9 @@ export const authenticateUser = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const { email, password, action } = data;
 
-    // Password hashing technique identical to original for complete backwards compatibility
-    const passwordHash = Buffer.from(password).toString("base64");
+    // Hashing with SHA-256 for secure credentials signup, supports legacy Base64 for backwards compatibility
+    const passwordHashLegacy = toBase64Legacy(password);
+    const passwordHashSecure = await sha256(password);
 
     // Query profile from Supabase by email
     const { data: existingUser } = await supabaseAdmin
@@ -71,7 +204,7 @@ export const authenticateUser = createServerFn({ method: "POST" })
       const newUser = {
         user_id: userId,
         email,
-        password_hash: passwordHash,
+        password_hash: passwordHashSecure, // New signups strictly use SHA-256
         full_name: email.split("@")[0],
         plan: "Free",
         integrations: { devto: "", medium: "", hashnode: "" }
@@ -104,11 +237,39 @@ export const authenticateUser = createServerFn({ method: "POST" })
         return { error: "User does not exist", code: "USER_NOT_FOUND" as const };
       }
 
-      if (existingUser.password_hash !== passwordHash) {
+      const inputSha256 = passwordHashSecure;
+      const inputBase64 = passwordHashLegacy;
+
+      let isMatch = false;
+      let needsUpgrade = false;
+
+      if (existingUser.password_hash === inputSha256) {
+        isMatch = true;
+      } else if (existingUser.password_hash === inputBase64) {
+        isMatch = true;
+        needsUpgrade = true;
+      }
+
+      if (!isMatch) {
         return { error: "Incorrect password", code: "BAD_PASSWORD" as const };
       }
 
-      const integrations = (existingUser.integrations as any) || { devto: "", medium: "", hashnode: "" };
+      if (needsUpgrade) {
+        // Upgrade user's password_hash to SHA-256 transparently
+        const { error: upgradeError } = await supabaseAdmin
+          .from("profiles")
+          .update({ password_hash: inputSha256 })
+          .eq("user_id", existingUser.user_id);
+        
+        if (upgradeError) {
+          console.error("Failed to upgrade legacy password hash to SHA-256:", upgradeError);
+        } else {
+          console.log(`Successfully upgraded legacy password hash to SHA-256 for user ${existingUser.user_id}`);
+        }
+      }
+
+      // Decrypt stored integration keys before passing to client state
+      const decryptedIntegrations = await decryptIntegrations(existingUser.integrations);
 
       return {
         user: {
@@ -117,7 +278,7 @@ export const authenticateUser = createServerFn({ method: "POST" })
           user_metadata: { 
             full_name: existingUser.full_name, 
             plan: existingUser.plan || "Free",
-            integrations
+            integrations: decryptedIntegrations
           },
         },
       };
@@ -127,9 +288,10 @@ export const authenticateUser = createServerFn({ method: "POST" })
   });
 
 export const updateUserProfile = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => z.object({ id: z.string(), fullName: z.string() }).parse(data))
+  .inputValidator((data: unknown) => z.object({ id: z.string(), fullName: z.string(), accessToken: z.string().optional() }).parse(data))
   .handler(async ({ data }) => {
-    const { id, fullName } = data;
+    const { id, fullName, accessToken } = data;
+    await assertAuthorized(id, accessToken);
 
     const { data: updatedProfile, error } = await supabaseAdmin
       .from("profiles")
@@ -142,7 +304,7 @@ export const updateUserProfile = createServerFn({ method: "POST" })
       throw new Error("User not found or failed to update profile");
     }
 
-    const integrations = (updatedProfile.integrations as any) || { devto: "", medium: "", hashnode: "" };
+    const decryptedIntegrations = await decryptIntegrations(updatedProfile.integrations);
 
     return {
       user: {
@@ -151,16 +313,66 @@ export const updateUserProfile = createServerFn({ method: "POST" })
         user_metadata: { 
           full_name: fullName, 
           plan: updatedProfile.plan || "Free",
-          integrations
+          integrations: decryptedIntegrations
+        },
+      }
+    };
+  });
+
+export const updateUserBrandVoice = createServerFn({ method: "POST" })
+  .inputValidator((data: unknown) => z.object({
+    id: z.string(),
+    brandVoice: z.object({
+      enabled: z.boolean(),
+      vocabulary: z.object({
+        prefer: z.string(),
+        avoid: z.string()
+      }),
+      sliders: z.object({
+        depth: z.number().min(0).max(100),
+        exuberance: z.number().min(0).max(100),
+        directness: z.number().min(0).max(100)
+      }),
+      sampleText: z.string()
+    }),
+    accessToken: z.string().optional()
+  }).parse(data))
+  .handler(async ({ data }) => {
+    const { id, brandVoice, accessToken } = data;
+    await assertAuthorized(id, accessToken);
+
+    const { data: updatedProfile, error } = await supabaseAdmin
+      .from("profiles")
+      .update({ brand_voice: brandVoice })
+      .eq("user_id", id)
+      .select()
+      .maybeSingle();
+
+    if (error || !updatedProfile) {
+      throw new Error("User not found or failed to update brand voice");
+    }
+
+    const decryptedIntegrations = await decryptIntegrations(updatedProfile.integrations);
+
+    return {
+      user: {
+        id,
+        email: updatedProfile.email,
+        user_metadata: { 
+          full_name: updatedProfile.full_name, 
+          plan: updatedProfile.plan || "Free",
+          integrations: decryptedIntegrations,
+          brand_voice: updatedProfile.brand_voice
         },
       }
     };
   });
 
 export const upgradeUserPlan = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => z.object({ id: z.string(), plan: z.string() }).parse(data))
+  .inputValidator((data: unknown) => z.object({ id: z.string(), plan: z.string(), accessToken: z.string().optional() }).parse(data))
   .handler(async ({ data }) => {
-    const { id, plan } = data;
+    const { id, plan, accessToken } = data;
+    await assertAuthorized(id, accessToken);
 
     const { data: updatedProfile, error } = await supabaseAdmin
       .from("profiles")
@@ -173,7 +385,7 @@ export const upgradeUserPlan = createServerFn({ method: "POST" })
       throw new Error("User not found or failed to upgrade plan");
     }
 
-    const integrations = (updatedProfile.integrations as any) || { devto: "", medium: "", hashnode: "" };
+    const decryptedIntegrations = await decryptIntegrations(updatedProfile.integrations);
 
     return {
       user: {
@@ -182,30 +394,80 @@ export const upgradeUserPlan = createServerFn({ method: "POST" })
         user_metadata: { 
           full_name: updatedProfile.full_name,
           plan: updatedProfile.plan || "Free",
-          integrations
+          integrations: decryptedIntegrations
         },
       }
     };
   });
 
 export const deleteUserAccount = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => z.object({ id: z.string() }).parse(data))
+  .inputValidator((data: unknown) => z.object({ id: z.string(), accessToken: z.string().optional() }).parse(data))
   .handler(async ({ data }) => {
-    const { id } = data;
+    const { id, accessToken } = data;
+    await assertAuthorized(id, accessToken);
     await supabaseAdmin.from("profiles").delete().eq("user_id", id);
     return { success: true };
   });
 
+async function ensureProfileExists(userId: string) {
+  const { data: profile } = await supabaseAdmin
+    .from("profiles")
+    .select("user_id")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (!profile) {
+    let email = `user-${userId.substring(0, 8)}@example.com`;
+    let fullName = "User";
+    try {
+      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(userId);
+      if (authUser?.user?.email) {
+        email = authUser.user.email;
+        fullName = authUser.user.user_metadata?.full_name || email.split("@")[0];
+      }
+    } catch (e) {
+      console.error("Self-healing: Failed to retrieve user from auth.users:", e);
+    }
+
+    const { error } = await supabaseAdmin.from("profiles").insert({
+      user_id: userId,
+      email,
+      full_name: fullName,
+      plan: "Free",
+      integrations: { devto: "", medium: "", hashnode: "" },
+      brand_voice: {
+        enabled: false,
+        vocabulary: { prefer: "", avoid: "" },
+        sliders: { depth: 50, exuberance: 50, directness: 50 },
+        sampleText: ""
+      }
+    });
+
+    if (error) {
+      console.error("Self-healing: Failed to insert missing profile:", error);
+    }
+  }
+}
+
 export const getUserDashboardData = createServerFn({ method: "GET" })
-  .inputValidator((data: unknown) => z.object({ userId: z.string() }).parse(data))
+  .inputValidator((data: unknown) => z.object({ userId: z.string(), accessToken: z.string().optional() }).parse(data))
   .handler(async ({ data }) => {
-    const { userId } = data;
+    const { userId, accessToken } = data;
+    await assertAuthorized(userId, accessToken);
+    await ensureProfileExists(userId);
 
     const { data: profile } = await supabaseAdmin
       .from("profiles")
-      .select("plan, integrations")
+      .select("plan, integrations, brand_voice")
       .eq("user_id", userId)
       .maybeSingle();
+
+    const defaultBrandVoice = {
+      enabled: false,
+      vocabulary: { prefer: "", avoid: "" },
+      sliders: { depth: 50, exuberance: 50, directness: 50 },
+      sampleText: ""
+    };
 
     if (!profile) {
       return {
@@ -213,6 +475,8 @@ export const getUserDashboardData = createServerFn({ method: "GET" })
         workspaces: [],
         templates: [],
         plan: "Free",
+        integrations: { devto: "", medium: "", hashnode: "" },
+        brandVoice: defaultBrandVoice,
         notFound: true,
       };
     }
@@ -268,14 +532,15 @@ export const getUserDashboardData = createServerFn({ method: "GET" })
       };
     });
 
-    const integrations = (profile.integrations as any) || { devto: "", medium: "", hashnode: "" };
+    const decryptedIntegrations = await decryptIntegrations(profile.integrations);
 
     return {
       generations: mappedGenerations,
       workspaces: mappedWorkspaces,
       templates: mappedTemplates,
       plan: profile.plan || "Free",
-      integrations,
+      integrations: decryptedIntegrations,
+      brandVoice: profile.brand_voice || defaultBrandVoice,
       notFound: false,
     };
   });
@@ -291,10 +556,13 @@ export const saveGenerationHistory = createServerFn({ method: "POST" })
     title: z.string(),
     markdown: z.string(),
     seo: z.any(),
-    workspaceId: z.string().optional()
+    workspaceId: z.string().optional(),
+    accessToken: z.string().optional()
   }).parse(data))
   .handler(async ({ data }) => {
-    const { userId, id, ...genData } = data;
+    const { userId, id, accessToken, ...genData } = data;
+    await assertAuthorized(userId, accessToken);
+    await ensureProfileExists(userId);
 
     const newVersionId = crypto.randomUUID();
 
@@ -444,10 +712,13 @@ export const updateGenerationContent = createServerFn({ method: "POST" })
     versionId: z.string().optional(),
     markdown: z.string(),
     title: z.string().optional(),
-    seo: z.any().optional()
+    seo: z.any().optional(),
+    accessToken: z.string().optional()
   }).parse(data))
   .handler(async ({ data }) => {
-    const { userId, genId, versionId, markdown, title, seo } = data;
+    const { userId, genId, versionId, markdown, title, seo, accessToken } = data;
+    await assertAuthorized(userId, accessToken);
+    await ensureProfileExists(userId);
 
     const genUpdates: any = { markdown };
     if (title) genUpdates.title = title;
@@ -511,17 +782,20 @@ export const updateGenerationContent = createServerFn({ method: "POST" })
   });
 
 export const deleteGenerationHistory = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => z.object({ userId: z.string(), genId: z.string() }).parse(data))
+  .inputValidator((data: unknown) => z.object({ userId: z.string(), genId: z.string(), accessToken: z.string().optional() }).parse(data))
   .handler(async ({ data }) => {
-    const { genId } = data;
+    const { userId, genId, accessToken } = data;
+    await assertAuthorized(userId, accessToken);
     await supabaseAdmin.from("generations").delete().eq("id", genId);
     return { success: true };
   });
 
 export const createWorkspaceFolder = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => z.object({ userId: z.string(), name: z.string() }).parse(data))
+  .inputValidator((data: unknown) => z.object({ userId: z.string(), name: z.string(), accessToken: z.string().optional() }).parse(data))
   .handler(async ({ data }) => {
-    const { userId, name } = data;
+    const { userId, name, accessToken } = data;
+    await assertAuthorized(userId, accessToken);
+    await ensureProfileExists(userId);
 
     const newWs = {
       user_id: userId,
@@ -548,9 +822,10 @@ export const createWorkspaceFolder = createServerFn({ method: "POST" })
   });
 
 export const deleteWorkspaceFolder = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => z.object({ userId: z.string(), wsId: z.string() }).parse(data))
+  .inputValidator((data: unknown) => z.object({ userId: z.string(), wsId: z.string(), accessToken: z.string().optional() }).parse(data))
   .handler(async ({ data }) => {
-    const { wsId } = data;
+    const { userId, wsId, accessToken } = data;
+    await assertAuthorized(userId, accessToken);
     await supabaseAdmin.from("workspaces").delete().eq("id", wsId);
     return { success: true };
   });
@@ -561,10 +836,13 @@ export const createCustomTemplate = createServerFn({ method: "POST" })
     name: z.string(),
     tone: z.string(),
     length: z.string(),
-    format: z.string()
+    format: z.string(),
+    accessToken: z.string().optional()
   }).parse(data))
   .handler(async ({ data }) => {
-    const { userId, name, tone, length, format } = data;
+    const { userId, name, tone, length, format, accessToken } = data;
+    await assertAuthorized(userId, accessToken);
+    await ensureProfileExists(userId);
 
     const newTpl = {
       user_id: userId,
@@ -597,17 +875,20 @@ export const createCustomTemplate = createServerFn({ method: "POST" })
   });
 
 export const deleteCustomTemplate = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => z.object({ userId: z.string(), templateId: z.string() }).parse(data))
+  .inputValidator((data: unknown) => z.object({ userId: z.string(), templateId: z.string(), accessToken: z.string().optional() }).parse(data))
   .handler(async ({ data }) => {
-    const { templateId } = data;
+    const { userId, templateId, accessToken } = data;
+    await assertAuthorized(userId, accessToken);
     await supabaseAdmin.from("templates").delete().eq("id", templateId);
     return { success: true };
   });
 
 export const moveGenerationWorkspace = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => z.object({ userId: z.string(), genId: z.string(), wsId: z.string().nullable() }).parse(data))
+  .inputValidator((data: z.SafeParseReturnType<any, any> | unknown) => z.object({ userId: z.string(), genId: z.string(), wsId: z.string().nullable(), accessToken: z.string().optional() }).parse(data))
   .handler(async ({ data }) => {
-    const { genId, wsId } = data;
+    const { userId, genId, wsId, accessToken } = data;
+    await assertAuthorized(userId, accessToken);
+    await ensureProfileExists(userId);
 
     await supabaseAdmin
       .from("generations")
@@ -730,19 +1011,24 @@ export const updateUserIntegrations = createServerFn({ method: "POST" })
     devto: z.string().optional(),
     medium: z.string().optional(),
     hashnode: z.string().optional(),
+    accessToken: z.string().optional()
   }).parse(data))
   .handler(async ({ data }) => {
-    const { id, devto, medium, hashnode } = data;
+    const { id, devto, medium, hashnode, accessToken } = data;
+    await assertAuthorized(id, accessToken);
 
-    const integrations = {
+    const rawIntegrations = {
       devto: devto || "",
       medium: medium || "",
       hashnode: hashnode || ""
     };
 
+    // Encrypt integration tokens before storing in database
+    const encryptedIntegrations = await encryptIntegrations(rawIntegrations);
+
     const { data: updatedProfile, error } = await supabaseAdmin
       .from("profiles")
-      .update({ integrations })
+      .update({ integrations: encryptedIntegrations })
       .eq("user_id", id)
       .select()
       .single();
@@ -751,6 +1037,8 @@ export const updateUserIntegrations = createServerFn({ method: "POST" })
       throw new Error("User not found or failed to update integrations");
     }
 
+    const decryptedIntegrations = await decryptIntegrations(updatedProfile.integrations);
+
     return {
       user: {
         id,
@@ -758,8 +1046,175 @@ export const updateUserIntegrations = createServerFn({ method: "POST" })
         user_metadata: {
           full_name: updatedProfile.full_name,
           plan: updatedProfile.plan || "Free",
-          integrations: updatedProfile.integrations || { devto: "", medium: "", hashnode: "" }
+          integrations: decryptedIntegrations
         }
       }
     };
+  });
+
+export const publishContentToPlatform = createServerFn({ method: "POST" })
+  .inputValidator((data: unknown) => z.object({
+    userId: z.string(),
+    platform: z.enum(["devto", "medium", "hashnode"]),
+    title: z.string(),
+    markdown: z.string(),
+    tags: z.array(z.string()).optional(),
+    accessToken: z.string().optional()
+  }).parse(data))
+  .handler(async ({ data }) => {
+    const { userId, platform, title, markdown, tags = [], accessToken } = data;
+    await assertAuthorized(userId, accessToken);
+    await ensureProfileExists(userId);
+
+    // Fetch integrations from user profile
+    const { data: profile } = await supabaseAdmin
+      .from("profiles")
+      .select("integrations")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!profile) throw new Error("User profile not found in database.");
+    
+    // Decrypt integrations before utilizing the token for publishing
+    const decryptedIntegrations = await decryptIntegrations(profile.integrations);
+    const apiToken = decryptedIntegrations[platform];
+    if (!apiToken || !apiToken.trim()) {
+      const platformName = platform === "devto" ? "Dev.to" : platform === "medium" ? "Medium" : "Hashnode";
+      const keyLabel = platform === "devto" ? "API Key" : "Integration Token";
+      throw new Error(`API key/token for ${platformName} is not configured. Please add your ${keyLabel} in Settings → Integrations.`);
+    }
+
+    try {
+      if (platform === "devto") {
+        const response = await fetch("https://dev.to/api/articles", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "api-key": apiToken.trim()
+          },
+          body: JSON.stringify({
+            article: {
+              title,
+              published: false,
+              body_markdown: markdown,
+              tags: tags.slice(0, 4) // Dev.to allows max 4 tags
+            }
+          })
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Dev.to API error (${response.status}): ${text}`);
+        }
+        return { success: true, url: "https://dev.to/dashboard" };
+      }
+
+      if (platform === "medium") {
+        // 1. Get Author ID
+        const meResponse = await fetch("https://api.medium.com/v1/me", {
+          headers: {
+            "Authorization": `Bearer ${apiToken.trim()}`,
+            "Content-Type": "application/json"
+          }
+        });
+        if (!meResponse.ok) {
+          const text = await meResponse.text();
+          throw new Error(`Medium auth failed: ${text}`);
+        }
+        const meJson = await meResponse.json();
+        const authorId = meJson.data?.id;
+        if (!authorId) throw new Error("Could not find Medium author ID");
+
+        // 2. Create Post
+        const postResponse = await fetch(`https://api.medium.com/v1/users/${authorId}/posts`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiToken.trim()}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            title,
+            contentFormat: "markdown",
+            content: markdown,
+            publishStatus: "draft",
+            tags: tags.slice(0, 5)
+          })
+        });
+        if (!postResponse.ok) {
+          const text = await postResponse.text();
+          throw new Error(`Medium publishing failed: ${text}`);
+        }
+        return { success: true, url: "https://medium.com/me/stories/drafts" };
+      }
+
+      if (platform === "hashnode") {
+        // 1. Get Publication ID
+        const pubResponse = await fetch("https://gql.hashnode.com", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": apiToken.trim()
+          },
+          body: JSON.stringify({
+            query: `
+              query {
+                me {
+                  publications(first: 1) {
+                    edges {
+                      node {
+                        id
+                      }
+                    }
+                  }
+                }
+              }
+            `
+          })
+        });
+        if (!pubResponse.ok) {
+          const text = await pubResponse.text();
+          throw new Error(`Hashnode fetch failed: ${text}`);
+        }
+        const pubJson = await pubResponse.json();
+        const publicationId = pubJson.data?.me?.publications?.edges?.[0]?.node?.id;
+        if (!publicationId) throw new Error("Could not find a Hashnode publication associated with your account.");
+
+        // 2. Create Draft
+        const draftResponse = await fetch("https://gql.hashnode.com", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": apiToken.trim()
+          },
+          body: JSON.stringify({
+            query: `
+              mutation CreateDraft($input: CreateDraftInput!) {
+                createDraft(input: $input) {
+                  draft {
+                    id
+                  }
+                }
+              }
+            `,
+            variables: {
+              input: {
+                title,
+                markdown,
+                tags: [],
+                publicationId
+              }
+            }
+          })
+        });
+        if (!draftResponse.ok) {
+          const text = await draftResponse.text();
+          throw new Error(`Hashnode draft failed: ${text}`);
+        }
+        return { success: true, url: "https://hashnode.com/dashboard" };
+      }
+    } catch (e: any) {
+      console.error(`Publishing to ${platform} failed:`, e);
+      throw new Error(e.message || "Platform publishing failed");
+    }
+
+    throw new Error("Invalid platform");
   });

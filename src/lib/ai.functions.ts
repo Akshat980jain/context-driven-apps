@@ -1,7 +1,29 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
+// Outbound API Connectivity Timeout Helper
+async function fetchWithTimeout(resource: string, options: RequestInit & { timeout?: number } = {}) {
+  const { timeout = 25000 } = options;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetch(resource, {
+      ...options,
+      signal: controller.signal
+    });
+    clearTimeout(id);
+    return response;
+  } catch (error: any) {
+    clearTimeout(id);
+    if (error.name === "AbortError" || error.message?.includes("aborted")) {
+      throw new Error(`Timeout: Outbound connection to external service timed out after ${timeout / 1000}s.`);
+    }
+    throw error;
+  }
+}
+
 // ─── Shared AI Helpers ───────────────────────────────────────────────
+
 
 function getAiConfig() {
   const openrouterKey = process.env.OPENROUTER_API_KEY;
@@ -43,7 +65,7 @@ async function callAi(
   }
 
   try {
-    const res = await fetch(config.endpoint, {
+    const res = await fetchWithTimeout(config.endpoint, {
       method: "POST",
       headers: config.headers,
       body: JSON.stringify({
@@ -54,6 +76,7 @@ async function callAi(
         ],
         max_tokens: maxTokens,
       }),
+      timeout: 25000
     });
 
     if (res.status === 429) return { content: "", error: "Rate limit hit. Try again in a moment." };
@@ -210,6 +233,19 @@ const BatchSchema = z.object({
   tone: z.string(),
   length: z.string(),
   format: z.string(),
+  brandVoice: z.object({
+    enabled: z.boolean(),
+    vocabulary: z.object({
+      prefer: z.string(),
+      avoid: z.string()
+    }),
+    sliders: z.object({
+      depth: z.number().min(0).max(100),
+      exuberance: z.number().min(0).max(100),
+      directness: z.number().min(0).max(100)
+    }),
+    sampleText: z.string()
+  }).optional()
 });
 
 export const batchConvertVideo = createServerFn({ method: "POST" })
@@ -225,6 +261,51 @@ export const batchConvertVideo = createServerFn({ method: "POST" })
       return {
         results: data.urls.map((url) => ({ url, error: "Missing AI API key." })),
       };
+    }
+
+    // Compile Brand Voice Cloner Instructions
+    let brandVoiceInstructions = "";
+    if (data.brandVoice && data.brandVoice.enabled) {
+      const bv = data.brandVoice;
+      const instructions: string[] = [];
+
+      // Technical Depth slider
+      if (bv.sliders.depth < 30) {
+        instructions.push("- Simplify complex technical concepts into very simple, beginner-friendly terms. Use clear analogies and avoid dense technical jargon.");
+      } else if (bv.sliders.depth > 70) {
+        instructions.push("- Write with extreme technical precision and depth, targeting advanced readers. Do not oversimplify, use precise domain-specific terminology, and provide highly detailed insights.");
+      }
+
+      // Exuberance / Energy slider
+      if (bv.sliders.exuberance < 30) {
+        instructions.push("- Maintain a strictly dry, factual, objective, and academic tone. Do not use exclamations, casual remarks, or humor.");
+      } else if (bv.sliders.exuberance > 70) {
+        instructions.push("- Infuse high energy, personal enthusiasm, and highly conversational developer humor. Use expressive language, bold hooks, and engaging analogies.");
+      }
+
+      // Directness / Clarity slider
+      if (bv.sliders.directness < 30) {
+        instructions.push("- Write in a descriptive, elaborate, and narrative-focused storytelling style. Connect ideas with smooth transitions and deep background context.");
+      } else if (bv.sliders.directness > 70) {
+        instructions.push("- Be extremely direct, concise, and structured. Get straight to the point, use short sentences, minimal filler words, and clean bullet lists for high readability.");
+      }
+
+      // Vocabulary lists
+      if (bv.vocabulary.prefer.trim()) {
+        instructions.push(`- Frequently prioritize using the following terms and concepts naturally in your writing: ${bv.vocabulary.prefer}`);
+      }
+      if (bv.vocabulary.avoid.trim()) {
+        instructions.push(`- CRITICAL: Completely avoid using the following buzzwords or expressions: ${bv.vocabulary.avoid}`);
+      }
+
+      // Prose writing sample
+      if (bv.sampleText.trim()) {
+        instructions.push(`- Closely emulate the sentence structures, tone, syntax rhythm, and stylistic flow demonstrated in the following writing sample:\n"""\n${bv.sampleText.slice(0, 4000)}\n"""`);
+      }
+
+      if (instructions.length > 0) {
+        brandVoiceInstructions = `\n\n─── CRITICAL BRAND VOICE CLONING PARAMETERS ───\nApply the following styling commands to override standard tone guidelines:\n${instructions.join("\n")}\n─────────────────────────────────────────────\n`;
+      }
     }
 
     const system = `You are a professional blog writer and content strategist with expertise in SEO.
@@ -243,7 +324,7 @@ Rules:
 - Tone: ${data.tone}
 - Format style: ${data.format}
 - Length: approximately ${LENGTH_WORDS[data.length] || "800 words"}
-- Output format: Markdown`;
+- Output format: Markdown${brandVoiceInstructions}`;
 
     const results: Array<{
       url: string;
@@ -255,9 +336,12 @@ Rules:
     for (const url of data.urls) {
       try {
         // 1. Fetch transcript
-        const tRes = await fetch(
+        const tRes = await fetchWithTimeout(
           `https://api.supadata.ai/v1/youtube/transcript?url=${encodeURIComponent(url)}&text=true`,
-          { headers: { "x-api-key": supadataKey } }
+          { 
+            headers: { "x-api-key": supadataKey },
+            timeout: 20000
+          }
         );
 
         if (!tRes.ok) {
@@ -279,7 +363,7 @@ Rules:
         // 2. Generate blog
         const userPrompt = `Here is the transcript from a YouTube video:\n\n---\n${transcript}\n---\n\nPlease convert this into a complete blog post following all the rules.\nRespond ONLY with the blog post in Markdown format.\nAt the end, append a JSON block exactly like this (after the blog content):\n\n\`\`\`json\n{\n  "title": "...",\n  "metaDescription": "...",\n  "tags": ["tag1","tag2","tag3","tag4","tag5"],\n  "readingTime": "X min read"\n}\n\`\`\``;
 
-        const aiRes = await fetch(config.endpoint, {
+        const aiRes = await fetchWithTimeout(config.endpoint, {
           method: "POST",
           headers: config.headers,
           body: JSON.stringify({
@@ -289,6 +373,7 @@ Rules:
               { role: "user", content: userPrompt },
             ],
           }),
+          timeout: 25000
         });
 
         if (!aiRes.ok) {

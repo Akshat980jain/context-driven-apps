@@ -112,12 +112,46 @@ function RootShell({ children }: { children: React.ReactNode }) {
   );
 }
 
+import { useEffect } from "react";
+import { toast } from "sonner";
+import { CustomDialogProvider } from "@/hooks/use-custom-dialog";
+
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  const router = useRouter();
+
+  useEffect(() => {
+    const handleOnline = () => {
+      toast.success("Connection restored! Syncing your workspace details...", {
+        duration: 4000
+      });
+      router.invalidate();
+    };
+
+    const handleOffline = () => {
+      toast.error("You are offline. Generation, sync, and publishing features will be unavailable.", {
+        duration: 10000
+      });
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      handleOffline();
+    }
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [router]);
 
   return (
     <QueryClientProvider client={queryClient}>
-      <Outlet />
+      <CustomDialogProvider>
+        <Outlet />
+      </CustomDialogProvider>
     </QueryClientProvider>
   );
 }
