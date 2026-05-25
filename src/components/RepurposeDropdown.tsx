@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { repurposeContent } from "@/lib/ai.functions";
+import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -88,13 +89,23 @@ export function RepurposeDropdown({ markdown, seo }: RepurposeDropdownProps) {
       toast.loading(`Writing ${platformLabel.toLowerCase()}...`, { id: toastId });
     }, 1800);
 
+    let userId: string | undefined = undefined;
+    const stored = localStorage.getItem("custom_session");
+    if (stored) {
+      const u = JSON.parse(stored);
+      userId = u.id;
+    }
+
     try {
+      const token = userId ? (await supabase.auth.getSession()).data.session?.access_token : undefined;
       const result = await repurposeFn({
         data: {
           markdown,
           title: seo.title,
           tags: seo.tags,
           platform,
+          userId,
+          accessToken: token
         },
       });
 

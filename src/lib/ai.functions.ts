@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { assertAuthorized } from "./auth.functions";
 
 // Outbound API Connectivity Timeout Helper
 async function fetchWithTimeout(resource: string, options: RequestInit & { timeout?: number } = {}) {
@@ -111,6 +112,8 @@ const RefineSchema = z.object({
     "grammar",
   ]),
   context: z.string().optional(),
+  userId: z.string().optional(),
+  accessToken: z.string().optional()
 });
 
 const ACTION_PROMPTS: Record<string, string> = {
@@ -135,6 +138,14 @@ const ACTION_PROMPTS: Record<string, string> = {
 export const refineText = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => RefineSchema.parse(data))
   .handler(async ({ data }) => {
+    if (data.userId) {
+      try {
+        await assertAuthorized(data.userId, data.accessToken);
+      } catch (err: any) {
+        return { refined: "", error: err.message || "Unauthorized" };
+      }
+    }
+
     const system = ACTION_PROMPTS[data.action] || ACTION_PROMPTS.grammar;
     const userPrompt = data.context
       ? `Context of the full article:\n---\n${data.context.slice(0, 3000)}\n---\n\nText to rewrite:\n${data.text}`
@@ -154,6 +165,8 @@ const RepurposeSchema = z.object({
   title: z.string().optional(),
   tags: z.array(z.string()).optional(),
   platform: z.enum(["twitter", "linkedin", "newsletter"]),
+  userId: z.string().optional(),
+  accessToken: z.string().optional()
 });
 
 const REPURPOSE_PROMPTS: Record<string, string> = {
@@ -210,6 +223,14 @@ Output ONLY the newsletter, nothing else.`,
 export const repurposeContent = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => RepurposeSchema.parse(data))
   .handler(async ({ data }) => {
+    if (data.userId) {
+      try {
+        await assertAuthorized(data.userId, data.accessToken);
+      } catch (err: any) {
+        return { content: "", error: err.message || "Unauthorized" };
+      }
+    }
+
     const system = REPURPOSE_PROMPTS[data.platform];
     const userPrompt = `Blog title: ${data.title || "Untitled"}\nTags: ${(data.tags || []).join(", ")}\n\n---\n${data.markdown.slice(0, 8000)}\n---`;
 
@@ -245,12 +266,22 @@ const BatchSchema = z.object({
       directness: z.number().min(0).max(100)
     }),
     sampleText: z.string()
-  }).optional()
+  }).optional(),
+  userId: z.string().optional(),
+  accessToken: z.string().optional()
 });
 
 export const batchConvertVideo = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => BatchSchema.parse(data))
   .handler(async ({ data }) => {
+    if (data.userId) {
+      try {
+        await assertAuthorized(data.userId, data.accessToken);
+      } catch (err: any) {
+        return { results: data.urls.map((url) => ({ url, error: err.message || "Unauthorized" })) };
+      }
+    }
+
     const supadataKey = process.env.SUPADATA_API_KEY;
     if (!supadataKey) {
       return { results: data.urls.map((url) => ({ url, error: "Missing SUPADATA_API_KEY." })) };

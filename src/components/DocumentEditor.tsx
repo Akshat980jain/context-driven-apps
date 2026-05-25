@@ -144,19 +144,44 @@ export function DocumentEditor({ markdown, onEdit, onSave }: DocumentEditorProps
     setHistoryIdx(nextHistory.length - 1);
   }, [history, historyIdx, onEdit]);
 
+  const historyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   // Read HTML from contentEditable, convert to markdown, propagate up
-  const flushEditorContent = useCallback(() => {
+  const flushEditorContent = useCallback((immediate = true) => {
     const el = editorRef.current;
     if (!el) return;
     const md = htmlToMarkdown(el);
+    isInternalUpdate.current = true;
     onEdit(md);
-    // Add to history
-    const nextHistory = history.slice(0, historyIdx + 1);
-    nextHistory.push(md);
-    if (nextHistory.length > 50) nextHistory.shift();
-    setHistory(nextHistory);
-    setHistoryIdx(nextHistory.length - 1);
-  }, [history, historyIdx, onEdit]);
+    
+    if (historyTimeoutRef.current) {
+      clearTimeout(historyTimeoutRef.current);
+      historyTimeoutRef.current = null;
+    }
+
+    const pushToHistory = () => {
+      setHistory(prev => {
+        const currentVersion = prev[historyIdx];
+        if (currentVersion === md) return prev; // Avoid duplicates
+        const nextHistory = prev.slice(0, historyIdx + 1);
+        nextHistory.push(md);
+        if (nextHistory.length > 50) nextHistory.shift();
+        setHistoryIdx(nextHistory.length - 1);
+        return nextHistory;
+      });
+    };
+
+    if (immediate) {
+      pushToHistory();
+    } else {
+      historyTimeoutRef.current = setTimeout(pushToHistory, 1000);
+    }
+  }, [historyIdx, onEdit]);
+
+  const flushRef = useRef(flushEditorContent);
+  useEffect(() => {
+    flushRef.current = flushEditorContent;
+  }, [flushEditorContent]);
 
   // Undo / Redo — use native execCommand for contentEditable
   const handleUndo = () => {
@@ -181,6 +206,12 @@ export function DocumentEditor({ markdown, onEdit, onSave }: DocumentEditorProps
   useEffect(() => {
     const el = editorRef.current;
     if (!el) return;
+    
+    if (isInternalUpdate.current) {
+      isInternalUpdate.current = false;
+      return;
+    }
+    
     // Only update if the content is genuinely different (avoid cursor reset on every keystroke)
     const currentMd = htmlToMarkdown(el).trim();
     if (currentMd !== markdown.trim()) {
@@ -771,7 +802,7 @@ export function DocumentEditor({ markdown, onEdit, onSave }: DocumentEditorProps
           if (el) {
             el.focus();
             document.execCommand('insertText', false, ' ' + transcript + ' ');
-            flushEditorContent();
+            flushRef.current();
           }
         };
 
@@ -788,7 +819,7 @@ export function DocumentEditor({ markdown, onEdit, onSave }: DocumentEditorProps
         setRecognition(rec);
       }
     }
-  }, [markdown, dictationLanguage]);
+  }, [dictationLanguage]);
 
   const toggleDictation = () => {
     if (!recognition) {
@@ -1939,7 +1970,7 @@ export function DocumentEditor({ markdown, onEdit, onSave }: DocumentEditorProps
               ref={editorRef}
               contentEditable
               suppressContentEditableWarning
-              onInput={() => flushEditorContent()}
+              onInput={() => flushEditorContent(false)}
               onMouseUp={saveSelection}
               onKeyUp={saveSelection}
               onMouseDown={() => setTimeout(saveSelection, 0)}

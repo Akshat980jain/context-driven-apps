@@ -337,21 +337,31 @@ export function SettingsModal({
     try {
       if (user) {
         const token = (await supabase.auth.getSession()).data.session?.access_token;
-        const res = await updateBrandVoiceFn({
+        await updateBrandVoiceFn({
           data: {
             id: user.id,
             brandVoice: bvData,
             accessToken: token
           }
         });
-        localStorage.setItem("custom_session", JSON.stringify(res.user));
-        setUser(res.user);
-        
-        window.dispatchEvent(new Event("auth_changed"));
+        // Merge bvData into the stored session without dispatching auth_changed
+        // (auth_changed would trigger a user re-read which could reset the toggle)
+        const stored = localStorage.getItem("custom_session");
+        if (stored) {
+          const currentSession = JSON.parse(stored);
+          const updatedSession = {
+            ...currentSession,
+            user_metadata: {
+              ...(currentSession.user_metadata || {}),
+              brand_voice: bvData
+            }
+          };
+          localStorage.setItem("custom_session", JSON.stringify(updatedSession));
+          setUser(updatedSession);
+        }
         toast.success("Brand Voice Clone saved to cloud profile successfully!");
       } else {
         localStorage.setItem("guest_brand_voice", JSON.stringify(bvData));
-        window.dispatchEvent(new Event("auth_changed"));
         toast.success("Brand Voice Clone saved locally to guest browser!");
       }
     } catch (err: any) {

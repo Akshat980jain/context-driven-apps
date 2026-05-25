@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useServerFn } from "@tanstack/react-start";
 import { refineText } from "@/lib/ai.functions";
+import { supabase } from "@/integrations/supabase/client";
 import {
   Minus,
   Plus,
@@ -23,6 +24,7 @@ interface InlineEditorProps {
   markdown: string;
   onEdit: (newMarkdown: string) => void;
   containerRef: React.RefObject<HTMLElement | null>;
+  user?: any;
 }
 
 type ActionType =
@@ -46,7 +48,7 @@ const ACTIONS: Array<{ key: ActionType; label: string; icon: React.ReactNode; co
   { key: "grammar", label: "Fix Grammar", icon: <SpellCheck className="size-3" />, color: "text-teal-400" },
 ];
 
-export function InlineEditor({ markdown, onEdit, containerRef }: InlineEditorProps) {
+export function InlineEditor({ markdown, onEdit, containerRef, user }: InlineEditorProps) {
   const [selectedText, setSelectedText] = useState("");
   const [toolbarPos, setToolbarPos] = useState<{ top: number; left: number } | null>(null);
   const [loading, setLoading] = useState(false);
@@ -146,11 +148,14 @@ export function InlineEditor({ markdown, onEdit, containerRef }: InlineEditorPro
     setActiveAction(action);
 
     try {
+      const token = user ? (await supabase.auth.getSession()).data.session?.access_token : undefined;
       const result = await refineFn({
         data: {
           text: selectedText,
           action,
           context: markdown.slice(0, 3000),
+          userId: user?.id || undefined,
+          accessToken: token
         },
       });
 
@@ -300,37 +305,82 @@ export function InlineEditor({ markdown, onEdit, containerRef }: InlineEditorPro
  * Since the rendered text has markdown syntax stripped, we find the best
  * approximate match in the raw markdown and replace it.
  */
+function cleanWord(w: string): string {
+  return w
+    .replace(/^[#*_~`[\]()!"'.,;?:]+|[#*_~`[\]()!"'.,;?:]+$/g, "")
+    .toLowerCase();
+}
+
+/**
+ * Replace selected rendered text inside the raw markdown.
+ * Since the rendered text has markdown syntax stripped, we find the best
+ * approximate match in the raw markdown and replace it.
+ */
 function replaceInMarkdown(markdown: string, selectedText: string, replacement: string): string {
   // 1. Try exact match first
   if (markdown.includes(selectedText)) {
     return markdown.replace(selectedText, replacement);
   }
 
-  // 2. Try matching by stripping markdown from each paragraph
+  // 2. Try matching by splitting paragraphs and finding the best token-level match
   const paragraphs = markdown.split(/\n\n+/);
   const selectedClean = selectedText.replace(/\s+/g, " ").trim().toLowerCase();
+  const selectedWords = selectedClean.split(" ").filter(Boolean);
 
-  for (let i = 0; i < paragraphs.length; i++) {
-    const para = paragraphs[i];
-    const paraClean = para
-      .replace(/(\*\*|__)(.*?)\1/g, "$2")
-      .replace(/(\*|_)(.*?)\1/g, "$2")
-      .replace(/#{1,6}\s+/g, "")
-      .replace(/\[([^\]]+)\]\(.*?\)/g, "$1")
-      .replace(/\s+/g, " ")
-      .trim()
-      .toLowerCase();
+  if (selectedWords.length > 0) {
+    for (let i = 0; i < paragraphs.length; i++) {
+      const para = paragraphs[i];
+      // Tokenize paragraph by spaces, preserving spaces in the array
+      const tokens = para.split(/(\s+)/);
+      
+      // Extract clean words with their index in the token array
+      interface WordToken {
+        tokenIndex: number;
+        cleaned: string;
+      }
+      const wordTokens: WordToken[] = [];
+      for (let j = 0; j < tokens.length; j++) {
+        const t = tokens[j];
+        if (t.trim()) {
+          wordTokens.push({ tokenIndex: j, cleaned: cleanWord(t) });
+        }
+      }
 
-    if (paraClean.includes(selectedClean) || selectedClean.includes(paraClean)) {
-      paragraphs[i] = replacement;
-      return paragraphs.join("\n\n");
+      // Slide window of size selectedWords.length to find the best match
+      let bestScore = 0;
+      let bestStart = -1;
+      let bestEnd = -1;
+
+      const len = selectedWords.length;
+      for (let startIdx = 0; startIdx <= wordTokens.length - len; startIdx++) {
+        let score = 0;
+        for (let k = 0; k < len; k++) {
+          if (wordTokens[startIdx + k].cleaned === selectedWords[k]) {
+            score++;
+          }
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          bestStart = wordTokens[startIdx].tokenIndex;
+          bestEnd = wordTokens[startIdx + len - 1].tokenIndex;
+        }
+      }
+
+      // If we matched at least 40% of the selection words (minimum of 2 matches)
+      if (bestStart !== -1 && bestScore >= Math.min(2, len * 0.4)) {
+        tokens[bestStart] = replacement;
+        for (let k = bestStart + 1; k <= bestEnd; k++) {
+          tokens[k] = "";
+        }
+        paragraphs[i] = tokens.join("");
+        return paragraphs.join("\n\n");
+      }
     }
   }
 
   // 3. Fallback: find closest substring match using sliding window
   const words = selectedClean.split(" ");
   const firstFewWords = words.slice(0, 5).join(" ");
-  const lastFewWords = words.slice(-5).join(" ");
 
   const mdLower = markdown.toLowerCase();
   const startIdx = mdLower.indexOf(firstFewWords);

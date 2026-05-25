@@ -257,6 +257,12 @@ function Index() {
         };
         localStorage.setItem("custom_session", JSON.stringify(customSession));
         setUser(customSession);
+      } else {
+        if (localStorage.getItem("custom_session")) {
+          localStorage.removeItem("custom_session");
+          setUser(null);
+          toast.info("Session expired. Please log in again.");
+        }
       }
     });
 
@@ -267,7 +273,15 @@ function Index() {
   }, []);
 
   // Synchronize active useBrandVoice toggle with configured brand_voice status
+  // Only sync on actual user identity changes (login/logout), not every user object update
+  const lastSyncedUserId = useRef<string | null>(null);
   useEffect(() => {
+    const currentId = user?.id || null;
+    // Only sync brand voice toggle when user IDENTITY changes (login/logout)
+    // Not when user object metadata updates (to avoid overwriting local toggle state)
+    if (lastSyncedUserId.current === currentId) return;
+    lastSyncedUserId.current = currentId;
+
     if (user) {
       setUseBrandVoice(user.user_metadata?.brand_voice?.enabled || false);
     } else {
@@ -808,11 +822,13 @@ function Index() {
         }
       };
 
+      // Update localStorage and state directly — do NOT dispatch auth_changed
+      // to avoid the session re-read effect resetting the toggle
       localStorage.setItem("custom_session", JSON.stringify(updatedUser));
+      // Update the ref so the sync effect knows this user ID was already synced
+      lastSyncedUserId.current = updatedUser.id;
       setUser(updatedUser);
       
-      window.dispatchEvent(new Event("auth_changed"));
-
       try {
         const token = (await supabase.auth.getSession()).data.session?.access_token;
         await updateBrandVoiceFn({
@@ -834,7 +850,7 @@ function Index() {
       };
       currentGuestBv.enabled = nextVal;
       localStorage.setItem("guest_brand_voice", JSON.stringify(currentGuestBv));
-      window.dispatchEvent(new Event("auth_changed"));
+      // No auth_changed dispatch needed — we already called setUseBrandVoice above
     }
 
     toast.success(nextVal ? "Brand Voice Clone activated!" : "Brand Voice Clone deactivated.");
@@ -906,13 +922,16 @@ function Index() {
         }
       }
 
+      const token = user ? (await supabase.auth.getSession()).data.session?.access_token : undefined;
       const res = await run({
         data: { 
           url: url.trim(), 
           tone, 
           length, 
           format,
-          brandVoice: activeBvData
+          brandVoice: activeBvData,
+          userId: user?.id || undefined,
+          accessToken: token
         },
       });
       if (res.error) {
@@ -1642,6 +1661,7 @@ function Index() {
                       markdown={markdown}
                       onEdit={handleDocumentEdit}
                       containerRef={articleRef}
+                      user={user}
                     />
                   </>
                 ) : view === "editor" ? (

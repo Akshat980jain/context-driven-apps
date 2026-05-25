@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { assertAuthorized } from "./auth.functions";
 
 // Outbound API Connectivity Timeout Helper
 async function fetchWithTimeout(resource: string, options: RequestInit & { timeout?: number } = {}) {
@@ -40,7 +41,9 @@ const InputSchema = z.object({
       directness: z.number().min(0).max(100)
     }),
     sampleText: z.string()
-  }).optional()
+  }).optional(),
+  userId: z.string().optional(),
+  accessToken: z.string().optional()
 });
 
 const LENGTH_WORDS: Record<string, string> = {
@@ -52,6 +55,14 @@ const LENGTH_WORDS: Record<string, string> = {
 export const convertVideo = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => InputSchema.parse(data))
   .handler(async ({ data }) => {
+    if (data.userId) {
+      try {
+        await assertAuthorized(data.userId, data.accessToken);
+      } catch (err: any) {
+        return { error: err.message || "Unauthorized" };
+      }
+    }
+
     const supadataKey = process.env.SUPADATA_API_KEY;
     const lovableKey = process.env.LOVABLE_API_KEY;
     const openrouterKey = process.env.OPENROUTER_API_KEY;

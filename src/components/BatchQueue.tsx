@@ -1,6 +1,8 @@
 import { useState, useMemo } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { batchConvertVideo } from "@/lib/ai.functions";
+import { convertVideo } from "@/lib/convert.functions";
+import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -77,7 +79,7 @@ export function BatchQueue({
   const [items, setItems] = useState<BatchItem[]>([]);
   const [phase, setPhase] = useState<"input" | "progress">("input");
 
-  const batchFn = useServerFn(batchConvertVideo);
+  const convertFn = useServerFn(convertVideo);
 
   const maxBatch = isPro ? 20 : 5;
   const remainingGens = isPro ? Infinity : 10 - generationCount;
@@ -113,11 +115,13 @@ export function BatchQueue({
       `Processing ${validUrls.length} video${validUrls.length > 1 ? "s" : ""}...`
     );
 
+    let userId: string | undefined = undefined;
     // Retrieve active Brand Voice Clone settings if enabled
     let activeBvData: any = undefined;
     const stored = localStorage.getItem("custom_session");
     if (stored) {
       const u = JSON.parse(stored);
+      userId = u.id;
       const bv = u.user_metadata?.brand_voice;
       if (bv && bv.enabled) {
         activeBvData = bv;
@@ -133,59 +137,83 @@ export function BatchQueue({
     }
 
     try {
-      // Mark first item as processing
-      setItems((prev) =>
-        prev.map((item, idx) => (idx === 0 ? { ...item, status: "processing" as BatchItemStatus } : item))
-      );
+      const activeTasks = [...validUrls];
+      let completedCount = 0;
+      let successCount = 0;
+      let errorCount = 0;
 
-      const result = await batchFn({
-        data: {
-          urls: validUrls,
-          tone,
-          length,
-          format,
-          brandVoice: activeBvData,
-        },
-      });
+      const runTask = async (url: string, index: number) => {
+        setItems((prev) =>
+          prev.map((item, idx) => (idx === index ? { ...item, status: "processing" as BatchItemStatus } : item))
+        );
 
-      // Update all items with results
-      const updatedItems: BatchItem[] = batchItems.map((item) => {
-        const res = result.results.find((r) => r.url === item.url) as any;
-        if (!res) return { ...item, status: "error" as BatchItemStatus, error: "No result returned" };
-        if (res.error) return { ...item, status: "error" as BatchItemStatus, error: res.error };
-        return {
-          ...item,
-          status: "done" as BatchItemStatus,
-          markdown: res.markdown,
-          seo: res.seo,
-        };
-      });
+        try {
+          const token = userId ? (await supabase.auth.getSession()).data.session?.access_token : undefined;
+          const res = await convertFn({
+            data: {
+              url,
+              tone: tone as any,
+              length: length as any,
+              format: format as any,
+              brandVoice: activeBvData,
+              userId,
+              accessToken: token
+            }
+          });
 
-      setItems(updatedItems);
+          if (res.error) {
+            setItems((prev) =>
+              prev.map((item, idx) => (idx === index ? { ...item, status: "error" as BatchItemStatus, error: res.error } : item))
+            );
+            errorCount++;
+          } else {
+            setItems((prev) =>
+              prev.map((item, idx) => (idx === index ? { ...item, status: "done" as BatchItemStatus, markdown: res.markdown, seo: res.seo } : item))
+            );
+            successCount++;
+          }
+        } catch (err: any) {
+          setItems((prev) =>
+            prev.map((item, idx) => (idx === index ? { ...item, status: "error" as BatchItemStatus, error: err.message } : item))
+          );
+          errorCount++;
+        } finally {
+          completedCount++;
+          toast.loading(`Processed ${completedCount}/${validUrls.length} videos...`, { id: toastId });
+        }
+      };
 
-      const doneCount = updatedItems.filter((i) => i.status === "done").length;
-      const errorCount = updatedItems.filter((i) => i.status === "error").length;
+      // Process tasks with a concurrency limit of 3
+      const limit = 3;
+      const workers: Promise<void>[] = [];
+      
+      const pool = async () => {
+        while (activeTasks.length > 0) {
+          const url = activeTasks.shift()!;
+          const index = validUrls.indexOf(url);
+          await runTask(url, index);
+        }
+      };
+
+      for (let w = 0; w < Math.min(limit, validUrls.length); w++) {
+        workers.push(pool());
+      }
+
+      await Promise.all(workers);
 
       if (errorCount === 0) {
-        toast.success(`All ${doneCount} blog posts generated successfully!`, {
+        toast.success(`All ${successCount} blog posts generated successfully!`, {
           id: toastId,
           duration: 5000,
         });
       } else {
-        toast.warning(`${doneCount} succeeded, ${errorCount} failed.`, {
+        toast.warning(`${successCount} succeeded, ${errorCount} failed.`, {
           id: toastId,
           duration: 5000,
         });
       }
     } catch (err) {
       toast.error("Batch processing failed.", { id: toastId });
-      setItems((prev) =>
-        prev.map((item) =>
-          item.status !== "done"
-            ? { ...item, status: "error" as BatchItemStatus, error: (err as Error).message }
-            : item
-        )
-      );
     } finally {
       setProcessing(false);
     }
