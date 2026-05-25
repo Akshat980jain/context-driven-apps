@@ -123,6 +123,7 @@ export type Database = {
       }
       profiles: {
         Row: {
+          brand_voice: Json | null
           created_at: string
           email: string
           full_name: string
@@ -134,6 +135,7 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          brand_voice?: Json | null
           created_at?: string
           email: string
           full_name?: string
@@ -145,6 +147,7 @@ export type Database = {
           user_id: string
         }
         Update: {
+          brand_voice?: Json | null
           created_at?: string
           email?: string
           full_name?: string
