@@ -14,218 +14,220 @@ export type Database = {
   }
   public: {
     Tables: {
-      profiles: {
+      generation_versions: {
         Row: {
           created_at: string
-          email: string
-          full_name: string
+          format: string
+          generation_id: string
           id: string
-          plan: string
-          updated_at: string
-          user_id: string
-          password_hash: string | null
-          integrations: Json
-          brand_voice: Json
+          length: string
+          markdown: string
+          seo: Json
+          title: string
+          tone: string
         }
         Insert: {
           created_at?: string
-          email: string
-          full_name?: string
+          format: string
+          generation_id: string
           id?: string
-          plan?: string
-          updated_at?: string
-          user_id: string
-          password_hash?: string | null
-          integrations?: Json
-          brand_voice?: Json
+          length: string
+          markdown: string
+          seo?: Json
+          title: string
+          tone: string
         }
         Update: {
           created_at?: string
-          email?: string
-          full_name?: string
+          format?: string
+          generation_id?: string
           id?: string
-          plan?: string
-          updated_at?: string
-          user_id?: string
-          password_hash?: string | null
-          integrations?: Json
-          brand_voice?: Json
-        }
-        Relationships: []
-      }
-      workspaces: {
-        Row: {
-          id: string
-          user_id: string
-          name: string
-          created_at: string
-          updated_at: string
-        }
-        Insert: {
-          id?: string
-          user_id: string
-          name: string
-          created_at?: string
-          updated_at?: string
-        }
-        Update: {
-          id?: string
-          user_id?: string
-          name?: string
-          created_at?: string
-          updated_at?: string
+          length?: string
+          markdown?: string
+          seo?: Json
+          title?: string
+          tone?: string
         }
         Relationships: [
           {
-            foreignKeyName: "fk_workspaces_profiles"
-            columns: ["user_id"]
-            referencedRelation: "profiles"
-            referencedColumns: ["user_id"]
-          }
+            foreignKeyName: "generation_versions_generation_id_fkey"
+            columns: ["generation_id"]
+            isOneToOne: false
+            referencedRelation: "generations"
+            referencedColumns: ["id"]
+          },
         ]
       }
       generations: {
         Row: {
-          id: string
-          user_id: string
-          url: string
-          tone: string
-          length: string
-          format: string
-          title: string
-          markdown: string
-          seo: Json
-          workspace_id: string | null
           active_version_id: string | null
           created_at: string
+          format: string
+          id: string
+          length: string
+          markdown: string
+          seo: Json
+          title: string
+          tone: string
           updated_at: string
+          url: string
+          user_id: string
+          workspace_id: string | null
         }
         Insert: {
-          id?: string
-          user_id: string
-          url: string
-          tone: string
-          length: string
+          active_version_id?: string | null
+          created_at?: string
           format: string
-          title: string
+          id?: string
+          length: string
           markdown: string
           seo?: Json
-          workspace_id?: string | null
-          active_version_id?: string | null
-          created_at?: string
+          title: string
+          tone: string
           updated_at?: string
+          url: string
+          user_id: string
+          workspace_id?: string | null
         }
         Update: {
-          id?: string
-          user_id?: string
-          url?: string
-          tone?: string
-          length?: string
-          format?: string
-          title?: string
-          markdown?: string
-          seo?: Json
-          workspace_id?: string | null
           active_version_id?: string | null
           created_at?: string
+          format?: string
+          id?: string
+          length?: string
+          markdown?: string
+          seo?: Json
+          title?: string
+          tone?: string
           updated_at?: string
+          url?: string
+          user_id?: string
+          workspace_id?: string | null
         }
         Relationships: [
           {
             foreignKeyName: "fk_generations_profiles"
             columns: ["user_id"]
+            isOneToOne: false
             referencedRelation: "profiles"
             referencedColumns: ["user_id"]
           },
           {
             foreignKeyName: "generations_workspace_id_fkey"
             columns: ["workspace_id"]
+            isOneToOne: false
             referencedRelation: "workspaces"
             referencedColumns: ["id"]
-          }
+          },
         ]
       }
-      generation_versions: {
+      profiles: {
         Row: {
-          id: string
-          generation_id: string
-          tone: string
-          length: string
-          format: string
-          title: string
-          markdown: string
-          seo: Json
           created_at: string
+          email: string
+          full_name: string
+          id: string
+          integrations: Json
+          password_hash: string | null
+          plan: string
+          updated_at: string
+          user_id: string
         }
         Insert: {
-          id?: string
-          generation_id: string
-          tone: string
-          length: string
-          format: string
-          title: string
-          markdown: string
-          seo?: Json
           created_at?: string
+          email: string
+          full_name?: string
+          id?: string
+          integrations?: Json
+          password_hash?: string | null
+          plan?: string
+          updated_at?: string
+          user_id: string
         }
         Update: {
-          id?: string
-          generation_id?: string
-          tone?: string
-          length?: string
-          format?: string
-          title?: string
-          markdown?: string
-          seo?: Json
           created_at?: string
+          email?: string
+          full_name?: string
+          id?: string
+          integrations?: Json
+          password_hash?: string | null
+          plan?: string
+          updated_at?: string
+          user_id?: string
         }
-        Relationships: [
-          {
-            foreignKeyName: "generation_versions_generation_id_fkey"
-            columns: ["generation_id"]
-            referencedRelation: "generations"
-            referencedColumns: ["id"]
-          }
-        ]
+        Relationships: []
       }
       templates: {
         Row: {
+          created_at: string
+          format: string
           id: string
-          user_id: string
+          length: string
           name: string
           tone: string
-          length: string
-          format: string
-          created_at: string
           updated_at: string
+          user_id: string
         }
         Insert: {
+          created_at?: string
+          format: string
           id?: string
-          user_id: string
+          length: string
           name: string
           tone: string
-          length: string
-          format: string
-          created_at?: string
           updated_at?: string
+          user_id: string
         }
         Update: {
+          created_at?: string
+          format?: string
           id?: string
-          user_id?: string
+          length?: string
           name?: string
           tone?: string
-          length?: string
-          format?: string
-          created_at?: string
           updated_at?: string
+          user_id?: string
         }
         Relationships: [
           {
             foreignKeyName: "fk_templates_profiles"
             columns: ["user_id"]
+            isOneToOne: false
             referencedRelation: "profiles"
             referencedColumns: ["user_id"]
-          }
+          },
+        ]
+      }
+      workspaces: {
+        Row: {
+          created_at: string
+          id: string
+          name: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          name: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          name?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_workspaces_profiles"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["user_id"]
+          },
         ]
       }
     }
