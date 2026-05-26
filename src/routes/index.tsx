@@ -1671,8 +1671,14 @@ function Index() {
 
                 {view === "preview" ? (
                   <>
+                    {citationCount > 0 && (
+                      <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
+                        <span aria-hidden>▶</span>
+                        {citationCount} source citation{citationCount === 1 ? "" : "s"} — click any timestamp to jump to that moment in the video
+                      </div>
+                    )}
                     <article ref={articleRef} className="prose-blog">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{markdown}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{renderedMarkdown}</ReactMarkdown>
                     </article>
                     <InlineEditor
                       markdown={markdown}
