@@ -990,7 +990,7 @@ function Index() {
   };
 
   const copy = async () => {
-    await navigator.clipboard.writeText(markdown);
+    await navigator.clipboard.writeText(stripCitationMarkers(markdown));
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
 
@@ -1002,7 +1002,7 @@ function Index() {
   };
 
   const download = (kind: "md" | "txt") => {
-    const blob = new Blob([markdown], { type: "text/plain;charset=utf-8" });
+    const blob = new Blob([stripCitationMarkers(markdown)], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     const fileName = `${(seo.title ?? "blog-post").replace(/[^\w-]+/g, "-").toLowerCase()}.${kind}`;
