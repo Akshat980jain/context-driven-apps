@@ -151,22 +151,6 @@ function Index() {
   const [batchOpen, setBatchOpen] = useState(false);
   const articleRef = useRef<HTMLElement>(null);
 
-  const sourceVideoId = useMemo(
-    () => extractYouTubeId(activeGen?.url || url),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeGen?.url, url, markdown],
-  );
-
-  const renderedMarkdown = useMemo(
-    () => injectCitationLinks(markdown, sourceVideoId),
-    [markdown, sourceVideoId],
-  );
-
-  const citationCount = useMemo(
-    () => (markdown.match(/\[\[t=\d+\]\]/g) || []).length,
-    [markdown],
-  );
-
   const usageCount = useMemo(() => {
     return generations.length + workspaces.length;
   }, [generations, workspaces]);
@@ -209,6 +193,22 @@ function Index() {
       setSeo(activeVersion.seo || {});
     }
   }, [activeVersion?.id]);
+
+  // ─── Source-of-truth citations ───
+  const sourceVideoId = useMemo(
+    () => extractYouTubeId(activeGen?.url || url),
+    [activeGen?.url, url],
+  );
+
+  const renderedMarkdown = useMemo(
+    () => injectCitationLinks(markdown, sourceVideoId),
+    [markdown, sourceVideoId],
+  );
+
+  const citationCount = useMemo(
+    () => (markdown.match(/\[\[t=\d+\]\]/g) || []).length,
+    [markdown],
+  );
 
   const getDashboardFn = useServerFn(getUserDashboardData);
   const saveGenFn = useServerFn(saveGenerationHistory);
