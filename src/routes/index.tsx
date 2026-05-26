@@ -30,6 +30,7 @@ import {
   publishContentToPlatform,
   updateUserBrandVoice
 } from "@/lib/auth.functions";
+import { extractYouTubeId, injectCitationLinks, stripCitationMarkers } from "@/lib/citations";
 import { Label } from "@/components/ui/label";
 import {
   Select,
