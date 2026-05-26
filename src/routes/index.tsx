@@ -30,6 +30,7 @@ import {
   publishContentToPlatform,
   updateUserBrandVoice
 } from "@/lib/auth.functions";
+import { extractYouTubeId, injectCitationLinks, stripCitationMarkers } from "@/lib/citations";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -192,6 +193,22 @@ function Index() {
       setSeo(activeVersion.seo || {});
     }
   }, [activeVersion?.id]);
+
+  // ─── Source-of-truth citations ───
+  const sourceVideoId = useMemo(
+    () => extractYouTubeId(activeGen?.url || url),
+    [activeGen?.url, url],
+  );
+
+  const renderedMarkdown = useMemo(
+    () => injectCitationLinks(markdown, sourceVideoId),
+    [markdown, sourceVideoId],
+  );
+
+  const citationCount = useMemo(
+    () => (markdown.match(/\[\[t=\d+\]\]/g) || []).length,
+    [markdown],
+  );
 
   const getDashboardFn = useServerFn(getUserDashboardData);
   const saveGenFn = useServerFn(saveGenerationHistory);
@@ -973,7 +990,7 @@ function Index() {
   };
 
   const copy = async () => {
-    await navigator.clipboard.writeText(markdown);
+    await navigator.clipboard.writeText(stripCitationMarkers(markdown));
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
 
@@ -985,7 +1002,7 @@ function Index() {
   };
 
   const download = (kind: "md" | "txt") => {
-    const blob = new Blob([markdown], { type: "text/plain;charset=utf-8" });
+    const blob = new Blob([stripCitationMarkers(markdown)], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     const fileName = `${(seo.title ?? "blog-post").replace(/[^\w-]+/g, "-").toLowerCase()}.${kind}`;
@@ -1654,8 +1671,14 @@ function Index() {
 
                 {view === "preview" ? (
                   <>
+                    {citationCount > 0 && (
+                      <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
+                        <span aria-hidden>▶</span>
+                        {citationCount} source citation{citationCount === 1 ? "" : "s"} — click any timestamp to jump to that moment in the video
+                      </div>
+                    )}
                     <article ref={articleRef} className="prose-blog">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{markdown}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{renderedMarkdown}</ReactMarkdown>
                     </article>
                     <InlineEditor
                       markdown={markdown}

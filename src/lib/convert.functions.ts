@@ -72,12 +72,13 @@ export const convertVideo = createServerFn({ method: "POST" })
       return { error: "Missing either LOVABLE_API_KEY or OPENROUTER_API_KEY." };
     }
 
-    // 1. Fetch transcript
-    let transcript = "";
+    // 1. Fetch transcript WITH timestamps so the AI can cite source moments.
+    let transcriptForAi = "";
+    let hasTimestamps = false;
     try {
       const tRes = await fetchWithTimeout(
-        `https://api.supadata.ai/v1/youtube/transcript?url=${encodeURIComponent(data.url)}&text=true`,
-        { 
+        `https://api.supadata.ai/v1/youtube/transcript?url=${encodeURIComponent(data.url)}`,
+        {
           headers: { "x-api-key": supadataKey },
           timeout: 20000
         },
@@ -86,16 +87,40 @@ export const convertVideo = createServerFn({ method: "POST" })
         const body = await tRes.text();
         return { error: `Transcript fetch failed (${tRes.status}). ${body.slice(0, 200)}` };
       }
-      const tJson = (await tRes.json()) as { content?: string };
-      transcript = (tJson.content ?? "").trim();
-      if (!transcript) return { error: "No transcript available for this video." };
+      const tJson = (await tRes.json()) as {
+        content?: string | Array<{ text: string; offset: number; duration?: number }>;
+      };
+
+      if (Array.isArray(tJson.content) && tJson.content.length > 0) {
+        // Group segments into ~25-second chunks tagged with their start second.
+        hasTimestamps = true;
+        const CHUNK_SECONDS = 25;
+        const chunks: string[] = [];
+        let curStart = Math.floor((tJson.content[0]?.offset ?? 0) / 1000);
+        let curText: string[] = [];
+        for (const seg of tJson.content) {
+          const sec = Math.floor((seg.offset ?? 0) / 1000);
+          if (curText.length === 0) curStart = sec;
+          curText.push(seg.text);
+          if (sec - curStart >= CHUNK_SECONDS) {
+            chunks.push(`[${curStart}s] ${curText.join(" ").trim()}`);
+            curText = [];
+          }
+        }
+        if (curText.length) chunks.push(`[${curStart}s] ${curText.join(" ").trim()}`);
+        transcriptForAi = chunks.join("\n");
+      } else if (typeof tJson.content === "string") {
+        transcriptForAi = tJson.content.trim();
+      }
+
+      if (!transcriptForAi) return { error: "No transcript available for this video." };
     } catch (e) {
       return { error: `Failed to fetch transcript: ${(e as Error).message}` };
     }
 
     // Cap transcript to avoid blowing token budget
     const MAX_CHARS = 60_000;
-    if (transcript.length > MAX_CHARS) transcript = transcript.slice(0, MAX_CHARS);
+    if (transcriptForAi.length > MAX_CHARS) transcriptForAi = transcriptForAi.slice(0, MAX_CHARS);
 
     // 2. Generate blog
     let brandVoiceInstructions = "";
@@ -142,6 +167,26 @@ export const convertVideo = createServerFn({ method: "POST" })
       }
     }
 
+    const citationRules = hasTimestamps
+      ? `
+
+─── SOURCE-OF-TRUTH CITATIONS (REQUIRED) ───
+The transcript below is annotated with markers like [12s], [37s], [65s] that mark the
+exact second in the source video where each chunk was spoken. After every major claim,
+statistic, quote, or section transition in the article, insert a citation marker in
+this EXACT format: [[t=SECONDS]] where SECONDS is the integer from the nearest [Xs]
+marker in the transcript that supports the claim.
+
+Rules for citations:
+- Place the marker inline at the END of the sentence it supports, before the period
+- Use 5-10 citations spread evenly across the article (intro, each H2 section, conclusion)
+- Never invent timestamps — only use seconds that actually appear as [Xs] in the transcript
+- Never group two markers together
+- Do NOT cite generic transitions or your own commentary — only factual claims from the source
+Example: "Transformer models reduced training time by 80% [[t=142]]."
+──────────────────────────────────────────`
+      : "";
+
     const system = `You are a professional blog writer and content strategist with expertise in SEO.
 Your job is to convert YouTube video transcripts into polished, engaging blog posts.
 
@@ -158,15 +203,15 @@ Rules:
 - Tone: ${data.tone}
 - Format style: ${data.format}
 - Length: approximately ${LENGTH_WORDS[data.length]}
-- Output format: Markdown${brandVoiceInstructions}`;
+- Output format: Markdown${brandVoiceInstructions}${citationRules}`;
 
-    const user = `Here is the transcript from a YouTube video:
+    const user = `Here is the transcript from a YouTube video${hasTimestamps ? " (annotated with [Xs] timestamps marking the second each chunk was spoken)" : ""}:
 
 ---
-${transcript}
+${transcriptForAi}
 ---
 
-Please convert this into a complete blog post following all the rules.
+Please convert this into a complete blog post following all the rules${hasTimestamps ? ", including the SOURCE-OF-TRUTH CITATIONS rules" : ""}.
 Respond ONLY with the blog post in Markdown format.
 At the end, append a JSON block exactly like this (after the blog content):
 
